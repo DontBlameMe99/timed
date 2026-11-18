@@ -10,5 +10,5 @@ icon = "clock"
 description = "Start and stop countdown timers from the launcher."
 deprecated = false
 plugin_api = 48
-tags = ["timer", "launcher", "utility"]
+tags = ["launcher", "service", "countdown", "time", "utility"]
 dependencies = ["libnotify"]

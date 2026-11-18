@@ -14,10 +14,6 @@ local duration = require("./lib/duration.luau")
 
 local MAX_INTERVAL_MS = 24 * 60 * 60 * 1000
 
-local pluginDir = noctalia.pluginDir()
-local icon = pluginDir and (pluginDir .. "/tie.png")
-local NOTIFY_ICON = (icon and noctalia.fileExists(icon)) and icon or "clock"
-
 local dataDir = noctalia.pluginDataDir()
 local statePath = dataDir and (dataDir .. "/timers.json")
 
@@ -82,27 +78,10 @@ local function publish()
   end
 end
 
--- A timer that finishes has to stay on screen until dismissed, so it goes
--- through notify-send with expire-time 0. noctalia.notify has no timeout knob
--- and is only the fallback when notify-send cannot start.
 local function notifyFinished(timer)
   local title = noctalia.tr("notify.title")
   local body = timer.message or noctalia.tr("notify.body", { duration = timer.label })
-  local launched = noctalia.runAsync({
-    "notify-send",
-    "-a",
-    "Timed",
-    "-t",
-    "0",
-    "-i",
-    NOTIFY_ICON,
-    "--",
-    title,
-    body,
-  })
-  if not launched then
-    noctalia.notify(title, body)
-  end
+  noctalia.notify(title, body)
 end
 
 local function schedule()
@@ -145,8 +124,7 @@ local function startTimer(seconds, id, message)
   table.sort(timers, function(a, b)
     return a.endsAt < b.endsAt
   end)
-  local note = message and (" (" .. message .. ")") or ""
-  noctalia.log("timed: started " .. tostring(id) .. " for " .. duration.human(seconds) .. note)
+  noctalia.log("timed: started " .. tostring(id) .. " for " .. duration.human(seconds))
   return true
 end
 
@@ -256,8 +234,7 @@ function onIpc(event, payload)
     noctalia.log("timed: " .. #timers .. " timer(s)")
     for _, timer in ipairs(timers) do
       local remaining = math.max(0, (timer.endsAt - noctalia.nowMs()) // 1000)
-      local note = timer.message and (" (" .. timer.message .. ")") or ""
-      noctalia.log("timed: " .. timer.id .. " " .. duration.clock(remaining) .. " left" .. note)
+      noctalia.log("timed: " .. timer.id .. " " .. duration.clock(remaining) .. " left")
     end
   end
 end

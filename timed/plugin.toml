@@ -4,8 +4,8 @@ version = "1.1.0"
 plugin_api = 48
 author = "DontBlameMe"
 license = "MIT"
-dependencies = ["libnotify"]
-tags = ["timer", "launcher", "utility"]
+dependencies = []
+tags = ["launcher", "service", "countdown", "time", "utility"]
 icon = "clock"
 description = "Start and stop countdown timers from the launcher."
 

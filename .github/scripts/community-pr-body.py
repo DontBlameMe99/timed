@@ -29,7 +29,9 @@ print(
 
 ## External dependencies
 
-No change. Completion notifications still use `notify-send` from `libnotify`.
+None. Completion notifications call `noctalia.notify(title, body)` and follow the
+shell's notification timeout. The plugin writes `timers.json` in Noctalia's
+per-plugin data directory and makes no network calls.
 
 ## Testing
 

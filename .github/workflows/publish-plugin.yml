@@ -66,20 +66,15 @@ jobs:
             exit 1
           fi
 
-      - name: Clone the fork
+      - name: Clone the community repository
         env:
           TOKEN: ${{ secrets.COMMUNITY_PLUGINS_TOKEN }}
         run: |
-          if [ -n "$TOKEN" ]; then
-            url="https://x-access-token:${TOKEN}@github.com/${FORK_REPO}.git"
-          else
-            url="https://github.com/${FORK_REPO}.git"
-          fi
-          git clone --depth 1 --filter=blob:none --sparse "$url" community
+          git clone --filter=blob:none --sparse "https://github.com/${COMMUNITY_REPO}.git" community
           git -C community sparse-checkout set .github "$PLUGIN_DIR"
-          git -C community remote add upstream "https://github.com/${COMMUNITY_REPO}.git"
-          git -C community fetch --depth 1 upstream main
-          git -C community reset --hard FETCH_HEAD
+          if [ -n "$TOKEN" ]; then
+            git -C community remote add fork "https://x-access-token:${TOKEN}@github.com/${FORK_REPO}.git"
+          fi
 
       - name: Read the published version
         id: published
@@ -145,7 +140,7 @@ jobs:
           fi
 
       - name: Push the update branch
-        if: ${{ !inputs.dry_run && steps.openpr.outputs.stop != 'true' }}
+        if: ${{ steps.sync.outputs.changed == 'true' && !inputs.dry_run && steps.openpr.outputs.stop != 'true' }}
         run: |
           branch="${{ steps.openpr.outputs.branch }}"
           version="${{ steps.plugin.outputs.version }}"
@@ -154,10 +149,10 @@ jobs:
           git -C community checkout -b "$branch"
           git -C community add -A -- "$PLUGIN_DIR"
           git -C community commit -m "feat: update $PLUGIN_ID to $version"
-          git -C community push --force origin "$branch"
+          git -C community push --force fork "HEAD:$branch"
 
       - name: Open the pull request
-        if: ${{ !inputs.dry_run && steps.openpr.outputs.stop != 'true' && steps.openpr.outputs.exists != 'true' }}
+        if: ${{ steps.sync.outputs.changed == 'true' && !inputs.dry_run && steps.openpr.outputs.stop != 'true' && steps.openpr.outputs.exists != 'true' }}
         env:
           GH_TOKEN: ${{ secrets.COMMUNITY_PLUGINS_TOKEN }}
           SUMMARY: ${{ inputs.summary }}
@@ -172,6 +167,6 @@ jobs:
             --title "feat: update $PLUGIN_ID to $version" --body-file "$RUNNER_TEMP/pr.md"
 
       - name: Report the synced version
-        if: ${{ !inputs.dry_run && steps.openpr.outputs.stop != 'true' }}
+        if: ${{ steps.sync.outputs.changed == 'true' && !inputs.dry_run && steps.openpr.outputs.stop != 'true' }}
         run: |
           echo "::notice::$PLUGIN_ID ${{ steps.plugin.outputs.version }} is on branch ${{ steps.openpr.outputs.branch }}."

@@ -3,7 +3,7 @@
 [[plugin]]
 id = "dontblameme/timed"
 name = "Timed"
-version = "1.0.0"
+version = "1.0.1"
 author = "DontBlameMe"
 license = "MIT"
 icon = "clock"

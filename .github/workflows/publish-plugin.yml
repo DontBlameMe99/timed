@@ -109,11 +109,18 @@ jobs:
             echo "::error::Bump version in $PLUGIN_DIR/plugin.toml. It is still $new."
             exit 1
           fi
+          highest="$(printf '%s\n%s\n' "$old" "$new" | sort -V | tail -1)"
+          if [ "$highest" != "$new" ]; then
+            echo "::error::Version must increase. Published $old, proposed $new."
+            exit 1
+          fi
           echo "Publishing $old -> $new."
 
       - name: Show the diff
         if: steps.sync.outputs.changed == 'true'
-        run: git -C community diff --stat -- "$PLUGIN_DIR"
+        run: |
+          git -C community add -A -- "$PLUGIN_DIR"
+          git -C community diff --cached --stat -- "$PLUGIN_DIR"
 
       - name: Look for an open pull request
         id: openpr
@@ -123,20 +130,22 @@ jobs:
           VERSION: ${{ steps.plugin.outputs.version }}
         run: |
           branch="${PLUGIN_DIR}-${VERSION}"
-          echo "branch=$branch" >> "$GITHUB_OUTPUT"
-          echo "stop=false" >> "$GITHUB_OUTPUT"
-          echo "exists=false" >> "$GITHUB_OUTPUT"
-          found="$(gh pr list --repo "$COMMUNITY_REPO" --state open --search "$PLUGIN_ID" --json number,headRefName --jq '.[0] | if . == null then "" else "\(.number) \(.headRefName)" end')"
+          {
+            echo "branch=$branch"
+            echo "stop=false"
+            echo "exists=false"
+          } >> "$GITHUB_OUTPUT"
+          found="$(gh pr list --repo "$COMMUNITY_REPO" --state open --search "in:title $PLUGIN_ID" --json number,headRefName --jq '.[] | "\(.number) \(.headRefName)"')"
           if [ -n "$found" ]; then
-            number="${found%% *}"
-            head="${found#* }"
-            if [ "$head" = "$branch" ]; then
-              echo "exists=true" >> "$GITHUB_OUTPUT"
-              echo "PR #$number covers $PLUGIN_ID from $branch."
-            else
-              echo "stop=true" >> "$GITHUB_OUTPUT"
-              echo "::notice::PR #$number already covers $PLUGIN_ID. Wait for it to merge."
-            fi
+            while read -r number head; do
+              if [ "$head" = "$branch" ]; then
+                echo "exists=true" >> "$GITHUB_OUTPUT"
+                echo "PR #$number covers $PLUGIN_ID from $branch."
+              else
+                echo "stop=true" >> "$GITHUB_OUTPUT"
+                echo "::notice::PR #$number already covers $PLUGIN_ID. Wait for it to merge."
+              fi
+            done <<< "$found"
           fi
 
       - name: Push the update branch
@@ -147,7 +156,6 @@ jobs:
           git -C community config user.name "github-actions[bot]"
           git -C community config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git -C community checkout -b "$branch"
-          git -C community add -A -- "$PLUGIN_DIR"
           git -C community commit -m "feat: update $PLUGIN_ID to $version"
           git -C community push --force fork "HEAD:$branch"
 

@@ -3,7 +3,7 @@
 Timed starts countdown timers from the Noctalia launcher and posts a notification
 when each one finishes. The optional message says what the timer was for.
 
-![Starting a 1 hour 5 minute timer from the launcher](screenshot.webp)
+![Starting a 1 minute 5 second timer from the launcher](screenshot.webp)
 
 ## Plugin
 

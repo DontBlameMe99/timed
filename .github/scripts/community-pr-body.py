@@ -39,6 +39,7 @@ per-plugin data directory and makes no network calls.
 - [{check("Hyprland")}] Tested on Hyprland
 - [{check("Niri")}] Tested on Niri
 - [{check("Sway")}] Tested on Sway
+- [ ] Tested on another compositor:
 - **Noctalia version tested against:** {noctalia_version}
 - **Plugin API level:** {api}
 

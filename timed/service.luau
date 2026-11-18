@@ -5,6 +5,10 @@
 -- The update interval follows the soonest timer instead of ticking every
 -- second, and state is published only when the list changes. A year-long
 -- timer re-checks once a day instead of every second.
+--
+-- The list is also saved to the plugin data directory, so timers survive a
+-- shell restart and a reboot. A timer that expired while the shell was gone
+-- notifies on the next start.
 
 local duration = require("./lib/duration.luau")
 
@@ -14,21 +18,37 @@ local pluginDir = noctalia.pluginDir()
 local icon = pluginDir and (pluginDir .. "/tie.png")
 local NOTIFY_ICON = (icon and noctalia.fileExists(icon)) and icon or "clock"
 
+local dataDir = noctalia.pluginDataDir()
+local statePath = dataDir and (dataDir .. "/timers.json")
+
 local timers = {}
 local lastCommand = tonumber(noctalia.state.get("timed.lastCommand")) or 0
 local ipcSeq = 0
 
-local saved = noctalia.state.get("timed.list")
-if type(saved) == "table" and type(saved.timers) == "table" then
-  for _, timer in ipairs(saved.timers) do
-    if
-      type(timer) == "table"
-      and type(timer.id) == "string"
-      and type(timer.endsAt) == "number"
-      and type(timer.seconds) == "number"
-      and type(timer.label) == "string"
-      and (timer.message == nil or type(timer.message) == "string")
-    then
+local function isTimer(value)
+  return type(value) == "table"
+    and type(value.id) == "string"
+    and type(value.endsAt) == "number"
+    and type(value.seconds) == "number"
+    and type(value.label) == "string"
+    and (value.message == nil or type(value.message) == "string")
+end
+
+local function loadTimers()
+  if not statePath then
+    return
+  end
+  local contents = noctalia.readFile(statePath)
+  if type(contents) ~= "string" then
+    return
+  end
+  local decoded = noctalia.json.decode(contents)
+  if type(decoded) ~= "table" or type(decoded.timers) ~= "table" then
+    noctalia.log("timed: ignoring unreadable saved timers")
+    return
+  end
+  for _, timer in ipairs(decoded.timers) do
+    if isTimer(timer) then
       table.insert(timers, timer)
     end
   end
@@ -46,6 +66,20 @@ local function publish()
     }
   end
   noctalia.state.set("timed.list", { timers = copy })
+  if statePath then
+    local encoded = noctalia.json.encode({ timers = copy })
+    if encoded then
+      -- A crash mid-write must not truncate the list the next start reads.
+      local tmpPath = statePath .. ".tmp"
+      local ok, err = noctalia.writeFile(tmpPath, encoded)
+      if ok then
+        ok, err = noctalia.renameFile(tmpPath, statePath)
+      end
+      if not ok then
+        noctalia.log("timed: cannot save timers: " .. tostring(err))
+      end
+    end
+  end
 end
 
 -- A timer that finishes has to stay on screen until dismissed, so it goes
@@ -179,8 +213,10 @@ local function expire()
   return changed
 end
 
+loadTimers()
 noctalia.state.watch("timed.command", handleCommand)
 handleCommand(noctalia.state.get("timed.command"))
+expire()
 publish()
 schedule()
 

@@ -107,6 +107,14 @@ Completion notifications are sent through `notify-send` with an expiry time of
 `libnotify`. If it is unavailable, Timed falls back to Noctalia's own
 notification, which uses the shell's default timeout.
 
+## Restarts and reboots
+
+Timers are saved to the plugin's data directory, so they survive a Noctalia
+restart and a reboot. Remaining time is computed from each stored end time.
+
+If a timer ends while Noctalia is not running, its notification appears when
+the shell starts again.
+
 ## Performance
 
 The service sets its update interval to the next timer expiry, capped at once

@@ -1,8 +1,7 @@
 # Timed
 
 Timed starts countdown timers from the Noctalia launcher and posts a notification
-when each one finishes. The notification stays on screen until you dismiss it, so
-a finished timer does not slip past you.
+when each one finishes. The optional message says what the timer was for.
 
 ![Starting a 1 hour 5 minute timer from the launcher](screenshot.webp)
 
@@ -15,10 +14,6 @@ a finished timer does not slip past you.
 | Launcher Prefix | `/timer` |
 
 ## Requirements
-
-`notify-send` from `libnotify` sends completion notifications that stay until
-dismissed. Without it, Timed falls back to Noctalia's own notification, which
-uses the shell's default timeout.
 
 The plugin requires a Noctalia release with plugin API 48 or newer.
 
@@ -74,8 +69,8 @@ restart and a reboot. Remaining time is computed from each stored end time. A
 timer that ends while Noctalia is not running notifies when the shell starts
 again.
 
-Completion notifications are sent through `notify-send` with an expiry time of
-0, so they remain until dismissed. They use the plugin's `tie.png` icon.
+Completion notifications use Noctalia's own notification, so they follow the
+notification timeout configured in the shell.
 
 The service sets its update interval to the next timer expiry, capped at once a
 day. A timer due in a year wakes the plugin once a day until it is close, and

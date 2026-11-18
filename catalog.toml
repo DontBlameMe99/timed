@@ -1,0 +1,14 @@
+# Noctalia plugin catalog for this source repository. The plugin manager reads
+# it from the source clone to discover plugins without a full checkout.
+[[plugin]]
+id = "dontblameme/timed"
+name = "Timed"
+version = "1.0.0"
+author = "DontBlameMe"
+license = "MIT"
+icon = "clock"
+description = "Start and stop countdown timers from the launcher."
+deprecated = false
+plugin_api = 48
+tags = ["timer", "launcher", "utility"]
+dependencies = ["libnotify"]

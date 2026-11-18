@@ -36,14 +36,15 @@ local function timerRows()
   local dateFormat = noctalia.dateFormat()
   for _, timer in ipairs(getTimers()) do
     local remaining = math.max(0, math.ceil((timer.endsAt - now) / 1000))
+    local title = noctalia.tr("launcher.stop")
+    if timer.message then
+      title = title .. " (" .. timer.message .. ")"
+    end
     table.insert(rows, {
       id = "stop:" .. timer.id,
-      title = noctalia.tr("launcher.stop", {
-        time = duration.clock(remaining),
-        duration = timer.message or timer.label,
-      }),
+      title = title,
       subtitle = noctalia.tr("launcher.ends_at", {
-        duration = timer.label,
+        duration = duration.human(remaining),
         time = noctalia.formatTime(remaining >= 86400 and dateFormat or timeFormat, timer.endsAt // 1000),
       }),
       glyph = "player-stop",

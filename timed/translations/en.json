@@ -5,8 +5,8 @@
   "launcher.hint": "Try 1h5, 1y, 4s10h3m, or 5 for 5 minutes",
   "launcher.start": "Start timer {time}",
   "launcher.message": "{duration} - {message}",
-  "launcher.stop": "Stop {time} ({duration})",
-  "launcher.ends_at": "{duration} - ends at {time}",
+  "launcher.stop": "Stop Timer",
+  "launcher.ends_at": "Ends at {time} - {duration}",
   "launcher.stop_all": "Stop all timers",
   "launcher.running": "{count} running",
   "launcher.invalid": "Invalid duration"

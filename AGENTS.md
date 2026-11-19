@@ -1,6 +1,8 @@
 # Timed
 
-Noctalia plugin. Luau plus `timed/plugin.toml`. No build step and no dev server.
+Noctalia plugin. Luau plus two TOML manifests, `catalog.toml` and
+`timed/plugin.toml`. Their catalog and plugin entries must match. No build step
+and no dev server.
 
 ## Checks
 
@@ -23,4 +25,5 @@ instead of guessing at `noctalia.*`, `ui.*`, `barWidget.*`, `panel.*`, or
 
 ## Python
 
-PyYAML is not installed. Use `tomllib` from the standard library.
+PyYAML is not installed. Read `catalog.toml` and `timed/plugin.toml` with
+`tomllib`. Do not parse YAML with Python.

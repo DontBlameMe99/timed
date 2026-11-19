@@ -57,10 +57,13 @@ jobs:
         env:
           VERSION: ${{ steps.bump.outputs.version }}
         run: |
-          if ! gh pr view "release/$VERSION" --json number --jq .number > /dev/null 2>&1; then
+          state="$(gh pr view "release/$VERSION" --json state --jq .state 2>/dev/null || true)"
+          if [ -z "$state" ]; then
             gh pr create --base main --head "release/$VERSION" \
               --title "chore: bump version to $VERSION" \
               --body "Bumps the version in \`timed/plugin.toml\` and \`catalog.toml\` to $VERSION."
+          elif [ "$state" = "CLOSED" ]; then
+            gh pr reopen "release/$VERSION"
           fi
 
       - name: Merge the release pull request

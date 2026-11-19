@@ -135,4 +135,31 @@ function M.human(seconds)
   return table.concat(parts, " ")
 end
 
+-- Coarse form for the bar: the nearest whole unit, such as 4h, 30m, or 1m.
+function M.approx(seconds)
+  local total = math.max(0, math.floor(seconds))
+  if total < 60 then
+    return "1m"
+  end
+  if total >= 86400 then
+    local days = math.floor(total / 86400 + 0.5)
+    if days >= 365 then
+      return math.floor(days / 365 + 0.5) .. "y"
+    end
+    return days .. "d"
+  end
+  if total >= 3600 then
+    local hours = math.floor(total / 3600 + 0.5)
+    if hours >= 24 then
+      return "1d"
+    end
+    return hours .. "h"
+  end
+  local minutes = math.floor(total / 60 + 0.5)
+  if minutes >= 60 then
+    return "1h"
+  end
+  return minutes .. "m"
+end
+
 return M

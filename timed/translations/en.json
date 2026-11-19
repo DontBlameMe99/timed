@@ -3,15 +3,86 @@
     "title": "Timed",
     "body": "{duration} timer finished"
   },
+  "bar": {
+    "empty": "No timers",
+    "timer": "{duration} timer",
+    "paused": "Paused - {time}"
+  },
+  "settings": {
+    "show_text": {
+      "label": "Show time",
+      "description": "Show the estimated remaining time next to the ring."
+    },
+    "show_count": {
+      "label": "Show count",
+      "description": "Show the number of timers inside the ring."
+    },
+    "show_progress": {
+      "label": "Show progress ring",
+      "description": "Draw a progress ring for the nearest timer."
+    },
+    "use_urgency_colors": {
+      "label": "Timer colors",
+      "description": "Switch the ring from the safe color to warning and urgent as the timer runs out."
+    },
+    "safe_color": {
+      "label": "Safe color",
+      "description": "Ring color while more than half the timer remains, or the only color when timer colors are off."
+    },
+    "warning_color": {
+      "label": "Warning color",
+      "description": "Ring color when half or less of the timer remains."
+    },
+    "urgent_color": {
+      "label": "Urgent color",
+      "description": "Ring color when a fifth or less of the timer remains."
+    },
+    "idle_color": {
+      "label": "Idle color",
+      "description": "Ring color when no timers are running."
+    },
+    "color": {
+      "primary": "Primary",
+      "secondary": "Secondary",
+      "tertiary": "Tertiary",
+      "error": "Error",
+      "on_surface": "Text",
+      "on_surface_variant": "Muted text"
+    },
+    "hide_when_idle": {
+      "label": "Hide when idle",
+      "description": "Hide the widget when no timers are running."
+    }
+  },
+  "panel": {
+    "title": "Timed",
+    "empty": "No timers running",
+    "timer": "{duration} timer",
+    "ends_at": "Ends at {time}",
+    "paused_left": "Paused",
+    "pause": "Pause",
+    "resume": "Resume",
+    "stop": "Stop",
+    "stop_all": "Stop all",
+    "placeholder": "Duration, e.g. 1h5 or 5",
+    "start": "Start",
+    "invalid": "Invalid duration"
+  },
   "launcher": {
-    "no_timers": "No timers running",
     "hint": "Try 1h5, 1y, 4s10h3m, or 5 for 5 minutes",
     "start": "Start timer {time}",
+    "start_new": "Start a new timer",
+    "timer": "{duration} timer",
     "message": "{duration} - {message}",
-    "stop": "Stop Timer",
+    "stop": "Stop",
+    "pause": "Pause",
+    "resume": "Resume",
+    "no_matching": "No timers here",
     "ends_at": "Ends at {time} - {duration}",
+    "paused_at": "Paused - {duration} left",
     "stop_all": "Stop all timers",
-    "running": "{count} running",
+    "one_timer": "1 timer",
+    "active_count": "{count} timers",
     "invalid": "Invalid duration"
   }
 }

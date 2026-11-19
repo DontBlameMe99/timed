@@ -23,7 +23,7 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Validate plugin manifest
-        uses: noctalia-dev/official-plugins/.github/actions/validate-plugins@99a892dc9cb3490634412701c45acd024fe0383b # main
+        uses: noctalia-dev/official-plugins/.github/actions/validate-plugins@5dc1d19b1aa6be331ee6506034dc8448aca5c446 # main
         with:
           profile: community
           root: ${{ github.workspace }}

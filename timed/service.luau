@@ -1,9 +1,13 @@
 --!nonstrict
 -- Timed service: owns the timer list, wakes at the next expiry, and notifies
--- when a timer finishes. The launcher sends commands through noctalia.state.
+-- when a timer finishes. The bar widget, panel, and launcher send commands
+-- through noctalia.state.
 --
--- The update interval follows the soonest timer instead of ticking every
--- second, and state is published only when the list changes. A year-long
+-- Timers can be paused. A running timer stores its end time, a paused timer
+-- stores its remaining time, so a pause survives a shell restart.
+--
+-- The update interval follows the soonest running timer instead of ticking
+-- every second, and state is published only when the list changes. A year-long
 -- timer re-checks once a day instead of every second.
 --
 -- The list is also saved to the plugin data directory, so timers survive a
@@ -21,13 +25,36 @@ local timers = {}
 local lastCommand = tonumber(noctalia.state.get("timed.lastCommand")) or 0
 local ipcSeq = 0
 
-local function isTimer(value)
-  return type(value) == "table"
-    and type(value.id) == "string"
-    and type(value.endsAt) == "number"
-    and type(value.seconds) == "number"
-    and type(value.label) == "string"
-    and (value.message == nil or type(value.message) == "string")
+local function normalize(saved)
+  if type(saved) ~= "table" then
+    return nil
+  end
+  if type(saved.id) ~= "string"
+    or type(saved.seconds) ~= "number"
+    or type(saved.label) ~= "string"
+    or (saved.message ~= nil and type(saved.message) ~= "string") then
+    return nil
+  end
+
+  local timer = {
+    id = saved.id,
+    seconds = saved.seconds,
+    label = saved.label,
+    message = saved.message,
+    paused = saved.paused == true,
+  }
+  if timer.paused then
+    if type(saved.remainingMs) ~= "number" then
+      return nil
+    end
+    timer.remainingMs = math.max(0, saved.remainingMs)
+  else
+    if type(saved.endsAt) ~= "number" then
+      return nil
+    end
+    timer.endsAt = saved.endsAt
+  end
+  return timer
 end
 
 local function loadTimers()
@@ -43,23 +70,42 @@ local function loadTimers()
     noctalia.log("timed: ignoring unreadable saved timers")
     return
   end
-  for _, timer in ipairs(decoded.timers) do
-    if isTimer(timer) then
+  for _, saved in ipairs(decoded.timers) do
+    local timer = normalize(saved)
+    if timer then
       table.insert(timers, timer)
     end
   end
 end
 
+local function sortTimers()
+  table.sort(timers, function(a, b)
+    if a.paused ~= b.paused then
+      return not a.paused
+    end
+    if a.paused then
+      return a.remainingMs < b.remainingMs
+    end
+    return a.endsAt < b.endsAt
+  end)
+end
+
 local function publish()
   local copy = {}
   for i, timer in ipairs(timers) do
-    copy[i] = {
+    local item = {
       id = timer.id,
-      endsAt = timer.endsAt,
       seconds = timer.seconds,
       label = timer.label,
       message = timer.message,
+      paused = timer.paused,
     }
+    if timer.paused then
+      item.remainingMs = timer.remainingMs
+    else
+      item.endsAt = timer.endsAt
+    end
+    copy[i] = item
   end
   noctalia.state.set("timed.list", { timers = copy })
   if statePath then
@@ -85,11 +131,17 @@ local function notifyFinished(timer)
 end
 
 local function schedule()
-  if #timers == 0 then
+  local nextEnd = nil
+  for _, timer in ipairs(timers) do
+    if not timer.paused and (nextEnd == nil or timer.endsAt < nextEnd) then
+      nextEnd = timer.endsAt
+    end
+  end
+  if nextEnd == nil then
     noctalia.setUpdateInterval(MAX_INTERVAL_MS)
     return
   end
-  local delay = timers[1].endsAt - noctalia.nowMs() + 50
+  local delay = nextEnd - noctalia.nowMs() + 50
   if delay < 100 then
     delay = 100
   elseif delay > MAX_INTERVAL_MS then
@@ -108,22 +160,49 @@ local function stopById(id)
   return false
 end
 
+local function pauseById(id)
+  local now = noctalia.nowMs()
+  for _, timer in ipairs(timers) do
+    if timer.id == id and not timer.paused then
+      local remaining = timer.endsAt - now
+      if remaining <= 0 then
+        return false
+      end
+      timer.paused = true
+      timer.remainingMs = remaining
+      timer.endsAt = nil
+      return true
+    end
+  end
+  return false
+end
+
+local function resumeById(id)
+  local now = noctalia.nowMs()
+  for _, timer in ipairs(timers) do
+    if timer.id == id and timer.paused then
+      timer.paused = false
+      timer.endsAt = now + timer.remainingMs
+      timer.remainingMs = nil
+      return true
+    end
+  end
+  return false
+end
+
 local function startTimer(seconds, id, message)
   seconds = math.floor(seconds)
   if seconds < 1 then
     return false
   end
-  local endsAt = noctalia.nowMs() + seconds * 1000
   table.insert(timers, {
     id = tostring(id),
-    endsAt = endsAt,
+    endsAt = noctalia.nowMs() + seconds * 1000,
     seconds = seconds,
     label = duration.human(seconds),
     message = message,
+    paused = false,
   })
-  table.sort(timers, function(a, b)
-    return a.endsAt < b.endsAt
-  end)
   noctalia.log("timed: started " .. tostring(id) .. " for " .. duration.human(seconds))
   return true
 end
@@ -145,6 +224,16 @@ local function apply(command)
     if changed then
       noctalia.log("timed: stopped " .. tostring(command.id))
     end
+  elseif command.action == "pause" then
+    changed = pauseById(tostring(command.id))
+    if changed then
+      noctalia.log("timed: paused " .. tostring(command.id))
+    end
+  elseif command.action == "resume" then
+    changed = resumeById(tostring(command.id))
+    if changed then
+      noctalia.log("timed: resumed " .. tostring(command.id))
+    end
   elseif command.action == "stop-all" then
     changed = #timers > 0
     timers = {}
@@ -154,6 +243,7 @@ local function apply(command)
   end
 
   if changed then
+    sortTimers()
     publish()
     schedule()
   end
@@ -177,7 +267,7 @@ local function expire()
   local kept = {}
   local changed = false
   for _, timer in ipairs(timers) do
-    if timer.endsAt <= now then
+    if not timer.paused and timer.endsAt <= now then
       notifyFinished(timer)
       noctalia.log("timed: finished " .. timer.id)
       changed = true
@@ -192,6 +282,7 @@ local function expire()
 end
 
 loadTimers()
+sortTimers()
 noctalia.state.watch("timed.command", handleCommand)
 handleCommand(noctalia.state.get("timed.command"))
 expire()
@@ -219,6 +310,7 @@ function onIpc(event, payload)
       ipcSeq = ipcSeq + 1
       local id = tostring(noctalia.nowMs()) .. "-" .. ipcSeq
       if startTimer(seconds, id, message) then
+        sortTimers()
         publish()
         schedule()
       end
@@ -230,11 +322,33 @@ function onIpc(event, payload)
       schedule()
       noctalia.log("timed: stopped all")
     end
+  elseif event == "stop" then
+    if stopById(tostring(payload)) then
+      publish()
+      schedule()
+      noctalia.log("timed: stopped " .. tostring(payload))
+    end
+  elseif event == "pause" then
+    if pauseById(tostring(payload)) then
+      sortTimers()
+      publish()
+      schedule()
+      noctalia.log("timed: paused " .. tostring(payload))
+    end
+  elseif event == "resume" then
+    if resumeById(tostring(payload)) then
+      sortTimers()
+      publish()
+      schedule()
+      noctalia.log("timed: resumed " .. tostring(payload))
+    end
   elseif event == "list" then
     noctalia.log("timed: " .. #timers .. " timer(s)")
+    local now = noctalia.nowMs()
     for _, timer in ipairs(timers) do
-      local remaining = math.max(0, (timer.endsAt - noctalia.nowMs()) // 1000)
-      noctalia.log("timed: " .. timer.id .. " " .. duration.clock(remaining) .. " left")
+      local remaining = math.max(0, (timer.paused and timer.remainingMs or timer.endsAt - now)) // 1000
+      local state = timer.paused and "paused" or "running"
+      noctalia.log("timed: " .. timer.id .. " " .. state .. " " .. duration.clock(remaining) .. " left")
     end
   end
 end

@@ -3,12 +3,12 @@
 [[plugin]]
 id = "dontblameme/timed"
 name = "Timed"
-version = "1.1.0"
+version = "1.2.0"
 author = "DontBlameMe"
 license = "MIT"
 dependencies = []
 icon = "clock"
-description = "Start and stop countdown timers from the launcher."
+description = "Start, pause, resume, and stop countdown timers from the bar or launcher."
 deprecated = false
 plugin_api = 48
-tags = ["launcher", "service", "countdown", "time", "utility"]
+tags = ["launcher", "bar", "panel", "service", "countdown", "time", "utility"]

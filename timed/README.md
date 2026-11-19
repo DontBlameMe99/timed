@@ -1,7 +1,8 @@
 # Timed
 
-Timed starts countdown timers from the Noctalia launcher and posts a notification
-when each one finishes. The optional message says what the timer was for.
+Timed starts countdown timers from the Noctalia bar or launcher and posts a
+notification when each one finishes. The optional message says what the timer
+was for.
 
 ![Starting a 1 minute 5 second timer from the launcher](screenshot.webp)
 
@@ -10,12 +11,53 @@ when each one finishes. The optional message says what the timer was for.
 | Field | Value |
 | --- | --- |
 | ID | `dontblameme/timed` |
-| Entries | Launcher provider: `launcher`; service: `service` |
+| Entries | Bar widget: `timed_indicator`; launcher provider: `launcher`; panel: `panel`; service: `service` |
 | Launcher Prefix | `/timer` |
 
 ## Requirements
 
 The plugin requires a Noctalia release with plugin API 48 or newer.
+
+## Bar widget
+
+Add the `dontblameme/timed:timed_indicator` widget to a bar. It shows the
+timer count inside a progress ring for the nearest timer, plus the remaining
+time. Hover it to list every timer with its message and remaining time. Click
+it to open the timer panel.
+
+The ring uses the theme color. With timer colors enabled, it switches from the
+safe color to the warning and urgent colors based on how much of the timer is
+left. The widget settings can hide the time, count, or ring, turn timer colors
+off, choose the safe, warning, urgent, and idle theme colors, and hide the
+widget when no timers are running. The time is a coarse estimate, such as 4h,
+30m, or 1m, and never drops below 1m.
+
+The panel lists every timer with pause or resume and stop buttons. It also has
+an input to start a new timer.
+
+## Panel
+
+Open the timer panel from the command line:
+
+```sh
+noctalia msg panel-toggle dontblameme/timed:panel
+```
+
+## Settings
+
+The bar widget has these per-instance settings:
+
+| Setting | What it does |
+| --- | --- |
+| Show time | Show the estimated remaining time next to the ring. |
+| Show count | Show the number of timers inside the ring. |
+| Show progress ring | Draw the ring for the nearest timer. |
+| Hide when idle | Hide the widget when no timers are running. |
+| Timer colors | Switch the ring color with timer progress. |
+| Safe color | Theme color while more than half the timer remains. |
+| Warning color | Theme color at half or less. |
+| Urgent color | Theme color at a fifth or less. |
+| Idle color | Theme color when no timers are running. |
 
 ## Usage
 
@@ -31,12 +73,14 @@ Open the launcher and type `/timer` followed by a duration.
 | `/timer 1y` | Starts a 1 year timer (365 days) |
 | `/timer 5` | Starts a 5 minute timer |
 | `/timer 3h2s something I want` | Starts a timer and uses the message in the notification |
-| `/timer` | Lists running timers, soonest first |
-| `/timer stop` | Stops all running timers |
+| `/timer` | Shows how to start a new timer |
+| `/timer pause` | Lists running timers to pause |
+| `/timer resume` | Lists paused timers to resume |
+| `/timer stop` | Lists timers to stop |
+| `/timer stop all` | Stops all timers |
 
-Selecting a timer stops it. Each row reads `Stop Timer (message)`, or `Stop
-Timer` when the timer has no message, and shows where it ends and how long is
-left, such as `Ends at 23:46 - 1h 1m 1s`.
+Each timer has a `Pause`, `Resume`, or `Stop` row with the optional message.
+The start row keeps the launcher open on the `/timer` prompt.
 
 Durations may contain `y`, `d`, `h`, `m`, and `s` in any order, and units may
 repeat. A bare number means minutes. A bare number after a unit takes the next
@@ -57,17 +101,21 @@ The service accepts commands, which is handy for keybinds and for testing:
 noctalia msg plugin dontblameme/timed:service all start 1m5
 noctalia msg plugin dontblameme/timed:service all start "3h2s something I want"
 noctalia msg plugin dontblameme/timed:service all list
+noctalia msg plugin dontblameme/timed:service all pause <id>
+noctalia msg plugin dontblameme/timed:service all resume <id>
+noctalia msg plugin dontblameme/timed:service all stop <id>
 noctalia msg plugin dontblameme/timed:service all stop-all
 ```
 
 `start` takes the same duration syntax and optional message as the launcher.
+`list` prints each timer id, which the pause, resume, and stop commands use.
 
 ## Notes
 
 Timers are saved to the plugin data directory, so they survive a Noctalia
 restart and a reboot. Remaining time is computed from each stored end time. A
-timer that ends while Noctalia is not running notifies when the shell starts
-again.
+paused timer stores its remaining time. A timer that ends while Noctalia is not
+running notifies when the shell starts again.
 
 Completion notifications use Noctalia's own notification, so they follow the
 notification timeout configured in the shell.

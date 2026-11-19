@@ -1,13 +1,13 @@
 id = "dontblameme/timed"
 name = "Timed"
-version = "1.1.0"
+version = "1.2.0"
 plugin_api = 48
 author = "DontBlameMe"
 license = "MIT"
 dependencies = []
-tags = ["launcher", "service", "countdown", "time", "utility"]
+tags = ["launcher", "bar", "panel", "service", "countdown", "time", "utility"]
 icon = "clock"
-description = "Start and stop countdown timers from the launcher."
+description = "Start, pause, resume, and stop countdown timers from the bar or launcher."
 
 [[service]]
 id = "service"
@@ -19,3 +19,176 @@ entry = "launcher.luau"
 prefix = "timer"
 glyph = "clock"
 include_in_global_search = false
+
+[[widget]]
+id = "timed_indicator"
+entry = "bar.luau"
+
+  [[widget.setting]]
+  key = "show_text"
+  type = "bool"
+  label_key = "settings.show_text.label"
+  description_key = "settings.show_text.description"
+  default = true
+
+  [[widget.setting]]
+  key = "show_count"
+  type = "bool"
+  label_key = "settings.show_count.label"
+  description_key = "settings.show_count.description"
+  default = true
+
+  [[widget.setting]]
+  key = "show_progress"
+  type = "bool"
+  label_key = "settings.show_progress.label"
+  description_key = "settings.show_progress.description"
+  default = true
+
+  [[widget.setting]]
+  key = "hide_when_idle"
+  type = "bool"
+  label_key = "settings.hide_when_idle.label"
+  description_key = "settings.hide_when_idle.description"
+  default = false
+
+  [[widget.setting]]
+  key = "use_urgency_colors"
+  type = "bool"
+  label_key = "settings.use_urgency_colors.label"
+  description_key = "settings.use_urgency_colors.description"
+  default = true
+
+  [[widget.setting]]
+  key = "safe_color"
+  type = "select"
+  label_key = "settings.safe_color.label"
+  description_key = "settings.safe_color.description"
+  default = "tertiary"
+
+  [[widget.setting.options]]
+  value = "primary"
+  label_key = "settings.color.primary"
+
+  [[widget.setting.options]]
+  value = "secondary"
+  label_key = "settings.color.secondary"
+
+  [[widget.setting.options]]
+  value = "tertiary"
+  label_key = "settings.color.tertiary"
+
+  [[widget.setting.options]]
+  value = "error"
+  label_key = "settings.color.error"
+
+  [[widget.setting.options]]
+  value = "on_surface"
+  label_key = "settings.color.on_surface"
+
+  [[widget.setting.options]]
+  value = "on_surface_variant"
+  label_key = "settings.color.on_surface_variant"
+
+  [[widget.setting]]
+  key = "warning_color"
+  type = "select"
+  label_key = "settings.warning_color.label"
+  description_key = "settings.warning_color.description"
+  default = "secondary"
+  visible_when = { key = "use_urgency_colors", values = ["true"] }
+
+  [[widget.setting.options]]
+  value = "primary"
+  label_key = "settings.color.primary"
+
+  [[widget.setting.options]]
+  value = "secondary"
+  label_key = "settings.color.secondary"
+
+  [[widget.setting.options]]
+  value = "tertiary"
+  label_key = "settings.color.tertiary"
+
+  [[widget.setting.options]]
+  value = "error"
+  label_key = "settings.color.error"
+
+  [[widget.setting.options]]
+  value = "on_surface"
+  label_key = "settings.color.on_surface"
+
+  [[widget.setting.options]]
+  value = "on_surface_variant"
+  label_key = "settings.color.on_surface_variant"
+
+  [[widget.setting]]
+  key = "urgent_color"
+  type = "select"
+  label_key = "settings.urgent_color.label"
+  description_key = "settings.urgent_color.description"
+  default = "error"
+  visible_when = { key = "use_urgency_colors", values = ["true"] }
+
+  [[widget.setting.options]]
+  value = "primary"
+  label_key = "settings.color.primary"
+
+  [[widget.setting.options]]
+  value = "secondary"
+  label_key = "settings.color.secondary"
+
+  [[widget.setting.options]]
+  value = "tertiary"
+  label_key = "settings.color.tertiary"
+
+  [[widget.setting.options]]
+  value = "error"
+  label_key = "settings.color.error"
+
+  [[widget.setting.options]]
+  value = "on_surface"
+  label_key = "settings.color.on_surface"
+
+  [[widget.setting.options]]
+  value = "on_surface_variant"
+  label_key = "settings.color.on_surface_variant"
+
+  [[widget.setting]]
+  key = "idle_color"
+  type = "select"
+  label_key = "settings.idle_color.label"
+  description_key = "settings.idle_color.description"
+  default = "primary"
+
+  [[widget.setting.options]]
+  value = "primary"
+  label_key = "settings.color.primary"
+
+  [[widget.setting.options]]
+  value = "secondary"
+  label_key = "settings.color.secondary"
+
+  [[widget.setting.options]]
+  value = "tertiary"
+  label_key = "settings.color.tertiary"
+
+  [[widget.setting.options]]
+  value = "error"
+  label_key = "settings.color.error"
+
+  [[widget.setting.options]]
+  value = "on_surface"
+  label_key = "settings.color.on_surface"
+
+  [[widget.setting.options]]
+  value = "on_surface_variant"
+  label_key = "settings.color.on_surface_variant"
+[[panel]]
+id = "panel"
+entry = "panel.luau"
+width = 380
+height = 360
+placement = "attached"
+position = "auto"
+open_near_click = true

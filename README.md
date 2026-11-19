@@ -2,7 +2,7 @@
 
 ![Timed](timed/thumbnail.webp)
 
-A Noctalia plugin for countdown timers started from the launcher.
+A Noctalia plugin for countdown timers started from the bar or launcher.
 
 ## Install
 
@@ -12,3 +12,8 @@ noctalia msg plugins enable dontblameme/timed
 ```
 
 See [timed/README.md](timed/README.md) for usage and duration formats.
+
+## Development
+
+See [docs/noctalia-plugins.md](docs/noctalia-plugins.md) for the Noctalia plugin
+API documentation links used by this plugin.

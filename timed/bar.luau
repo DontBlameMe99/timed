@@ -25,6 +25,8 @@ local timers = {}
 local ringSeq = 0
 local ringPath = nil
 local ringSvg = nil
+local lastTooltip = nil
+local currentInterval = nil
 local instanceId = nil
 
 local function setting(key, default)
@@ -69,6 +71,14 @@ local function instanceKey()
   return instanceId
 end
 
+local function setInterval(ms)
+  if ms == currentInterval then
+    return
+  end
+  currentInterval = ms
+  noctalia.setUpdateInterval(ms)
+end
+
 local function applyInterval()
   local running = false
   for _, timer in ipairs(timers) do
@@ -77,7 +87,7 @@ local function applyInterval()
       break
     end
   end
-  noctalia.setUpdateInterval(running and RUNNING_INTERVAL_MS or IDLE_INTERVAL_MS)
+  setInterval(running and RUNNING_INTERVAL_MS or IDLE_INTERVAL_MS)
 end
 
 local function timerTitle(timer)
@@ -146,20 +156,31 @@ local function countBadge(count, role)
   })
 end
 
-local function tooltip()
-  if #timers == 0 then
-    return noctalia.tr("bar.empty")
+local function setTooltip(value, signature)
+  if signature == lastTooltip then
+    return
   end
-  local now = noctalia.nowMs()
+  lastTooltip = signature
+  barWidget.setTooltip(value)
+end
+
+local function tooltip(now)
+  if #timers == 0 then
+    local value = noctalia.tr("bar.empty")
+    setTooltip(value, value)
+    return
+  end
   local rows = {}
+  local parts = {}
   for _, timer in ipairs(timers) do
     local left = duration.approx(timersLib.remainingSeconds(timer, now))
     if timer.paused then
       left = noctalia.tr("bar.paused", { time = left })
     end
     table.insert(rows, { key = timerTitle(timer), value = left })
+    table.insert(parts, timer.id .. "=" .. left)
   end
-  return rows
+  setTooltip(rows, table.concat(parts, "|"))
 end
 
 local function render()
@@ -168,7 +189,7 @@ local function render()
 
   if cfg.hideWhenIdle and #timers == 0 then
     barWidget.setVisible(false)
-    noctalia.setUpdateInterval(HIDDEN_INTERVAL_MS)
+    setInterval(HIDDEN_INTERVAL_MS)
     return
   end
   barWidget.setVisible(true)
@@ -219,7 +240,7 @@ local function render()
 
   local container = vertical and ui.column or ui.row
   barWidget.render(container({ gap = vertical and 3 or 6, align = "center" }, children))
-  barWidget.setTooltip(tooltip())
+  tooltip(now)
   applyInterval()
 end
 

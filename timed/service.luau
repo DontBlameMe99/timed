@@ -25,6 +25,15 @@ local timers = {}
 local lastCommand = tonumber(noctalia.state.get("timed.lastCommand")) or 0
 local ipcSeq = 0
 local savedContents = nil
+local currentInterval = nil
+
+local function setInterval(ms)
+  if ms == currentInterval then
+    return
+  end
+  currentInterval = ms
+  noctalia.setUpdateInterval(ms)
+end
 
 local function normalize(saved)
   if type(saved) ~= "table" then
@@ -137,12 +146,13 @@ end
 local function schedule(now)
   local nextEnd = nil
   for _, timer in ipairs(timers) do
-    if not timer.paused and (nextEnd == nil or timer.endsAt < nextEnd) then
+    if not timer.paused then
       nextEnd = timer.endsAt
+      break
     end
   end
   if nextEnd == nil then
-    noctalia.setUpdateInterval(MAX_INTERVAL_MS)
+    setInterval(MAX_INTERVAL_MS)
     return
   end
   local delay = nextEnd - (now or noctalia.nowMs()) + 50
@@ -151,7 +161,7 @@ local function schedule(now)
   elseif delay > MAX_INTERVAL_MS then
     delay = MAX_INTERVAL_MS
   end
-  noctalia.setUpdateInterval(delay)
+  setInterval(delay)
 end
 
 local function stopById(id)
@@ -248,7 +258,9 @@ local function apply(command)
   end
 
   if changed then
-    sortTimers()
+    if command.action ~= "stop" and command.action ~= "stop-all" then
+      sortTimers()
+    end
     publish()
     schedule()
   end
@@ -271,13 +283,18 @@ local function expire(now)
   now = now or noctalia.nowMs()
   local kept = {}
   local changed = false
-  for _, timer in ipairs(timers) do
-    if not timer.paused and timer.endsAt <= now then
+  for i, timer in ipairs(timers) do
+    if timer.paused then
+      table.insert(kept, timer)
+    elseif timer.endsAt > now then
+      for j = i, #timers do
+        table.insert(kept, timers[j])
+      end
+      break
+    else
       notifyFinished(timer)
       noctalia.log("timed: finished " .. timer.id)
       changed = true
-    else
-      table.insert(kept, timer)
     end
   end
   if changed then

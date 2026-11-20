@@ -9,13 +9,13 @@ local timers = {}
 local newText = ""
 local inputKey = 0
 local errorText = nil
+local open = false
 
 local function timerTitle(timer)
   return timer.message or noctalia.tr("panel.timer", { duration = timer.label })
 end
 
-local function subtitle(timer, now)
-  local remaining = timersLib.remainingSeconds(timer, now)
+local function subtitle(timer, remaining, timeFormat, dateFormat)
   if timer.paused then
     return noctalia.tr("panel.paused_left")
   end
@@ -36,14 +36,15 @@ local function stop(timer)
   timersLib.send({ action = "stop", id = timer.id })
 end
 
-local function timerRow(timer, now, colors)
+local function timerRow(timer, now, colors, timeFormat, dateFormat)
   local paused = timer.paused
   local state = urgency.state(timer, now)
-  local role = urgency.role(timer, now, colors)
-  local remaining = timersLib.remainingSeconds(timer, now)
+  local role = urgency.role(timer, now, colors, state)
+  local remainingMs = timersLib.remainingMs(timer, now)
+  local remaining = math.ceil(remainingMs / 1000)
   local progress = 0
   if timer.seconds > 0 then
-    progress = math.clamp(timersLib.remainingMs(timer, now) / (timer.seconds * 1000), 0, 1)
+    progress = math.clamp(remainingMs / (timer.seconds * 1000), 0, 1)
   end
   local timeColor = nil
   if state == "paused" then
@@ -65,7 +66,7 @@ local function timerRow(timer, now, colors)
       ui.column({ gap = 2, flexGrow = 1 }, {
         ui.label({ text = timerTitle(timer), fontWeight = "semibold", maxLines = 1 }),
         ui.label({
-          text = subtitle(timer, now),
+          text = subtitle(timer, remaining, timeFormat, dateFormat),
           fontSize = 12,
           color = "on_surface_variant",
           maxLines = 1,
@@ -146,10 +147,12 @@ render = function()
       ui.label({ text = noctalia.tr("panel.empty"), color = "on_surface_variant" }),
     })
   else
+    local timeFormat = noctalia.timeFormat()
+    local dateFormat = noctalia.dateFormat()
     local colors = urgency.colors()
     local rows = {}
     for _, timer in ipairs(timers) do
-      table.insert(rows, timerRow(timer, now, colors))
+      table.insert(rows, timerRow(timer, now, colors, timeFormat, dateFormat))
     end
     body = ui.scroll({ flexGrow = 1, gap = 8 }, rows)
   end
@@ -184,6 +187,7 @@ render = function()
 end
 
 function onOpen()
+  open = true
   timers = timersLib.list()
   newText = ""
   errorText = nil
@@ -191,7 +195,14 @@ function onOpen()
   render()
 end
 
+function onClose()
+  open = false
+end
+
 function update()
+  if not open then
+    return
+  end
   timers = timersLib.list()
   render()
 end
@@ -217,6 +228,9 @@ function onStopAll()
 end
 
 noctalia.state.watch("timed.list", function()
+  if not open then
+    return
+  end
   timers = timersLib.list()
   render()
 end)

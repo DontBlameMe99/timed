@@ -24,6 +24,7 @@ local statePath = dataDir and (dataDir .. "/timers.json")
 local timers = {}
 local lastCommand = tonumber(noctalia.state.get("timed.lastCommand")) or 0
 local ipcSeq = 0
+local savedContents = nil
 
 local function normalize(saved)
   if type(saved) ~= "table" then
@@ -70,6 +71,7 @@ local function loadTimers()
     noctalia.log("timed: ignoring unreadable saved timers")
     return
   end
+  savedContents = contents
   for _, saved in ipairs(decoded.timers) do
     local timer = normalize(saved)
     if timer then
@@ -110,7 +112,7 @@ local function publish()
   noctalia.state.set("timed.list", { timers = copy })
   if statePath then
     local encoded = noctalia.json.encode({ timers = copy })
-    if encoded then
+    if encoded and encoded ~= savedContents then
       -- A crash mid-write must not truncate the list the next start reads.
       local tmpPath = statePath .. ".tmp"
       local ok, err = noctalia.writeFile(tmpPath, encoded)
@@ -119,6 +121,8 @@ local function publish()
       end
       if not ok then
         noctalia.log("timed: cannot save timers: " .. tostring(err))
+      else
+        savedContents = encoded
       end
     end
   end
@@ -130,7 +134,7 @@ local function notifyFinished(timer)
   noctalia.notify(title, body)
 end
 
-local function schedule()
+local function schedule(now)
   local nextEnd = nil
   for _, timer in ipairs(timers) do
     if not timer.paused and (nextEnd == nil or timer.endsAt < nextEnd) then
@@ -141,7 +145,7 @@ local function schedule()
     noctalia.setUpdateInterval(MAX_INTERVAL_MS)
     return
   end
-  local delay = nextEnd - noctalia.nowMs() + 50
+  local delay = nextEnd - (now or noctalia.nowMs()) + 50
   if delay < 100 then
     delay = 100
   elseif delay > MAX_INTERVAL_MS then
@@ -195,15 +199,16 @@ local function startTimer(seconds, id, message)
   if seconds < 1 then
     return false
   end
+  local label = duration.human(seconds)
   table.insert(timers, {
     id = tostring(id),
     endsAt = noctalia.nowMs() + seconds * 1000,
     seconds = seconds,
-    label = duration.human(seconds),
+    label = label,
     message = message,
     paused = false,
   })
-  noctalia.log("timed: started " .. tostring(id) .. " for " .. duration.human(seconds))
+  noctalia.log("timed: started " .. tostring(id) .. " for " .. label)
   return true
 end
 
@@ -262,8 +267,8 @@ local function handleCommand(command)
   apply(command)
 end
 
-local function expire()
-  local now = noctalia.nowMs()
+local function expire(now)
+  now = now or noctalia.nowMs()
   local kept = {}
   local changed = false
   for _, timer in ipairs(timers) do
@@ -290,17 +295,19 @@ publish()
 schedule()
 
 function update()
-  if expire() then
+  local now = noctalia.nowMs()
+  if expire(now) then
     publish()
   end
-  schedule()
+  schedule(now)
 end
 
 function onResume()
-  if expire() then
+  local now = noctalia.nowMs()
+  if expire(now) then
     publish()
   end
-  schedule()
+  schedule(now)
 end
 
 function onIpc(event, payload)

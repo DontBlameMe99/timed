@@ -9,6 +9,7 @@ local urgency = require("./lib/urgency.luau")
 local PANEL_ID = "dontblameme/timed:panel"
 local RUNNING_INTERVAL_MS = 1000
 local IDLE_INTERVAL_MS = 60 * 1000
+local HIDDEN_INTERVAL_MS = 24 * 60 * 60 * 1000
 
 local RING_SIZE = 26
 local RING_VIEWBOX = 40
@@ -17,10 +18,15 @@ local RING_STROKE = 4
 local RING_CIRCUMFERENCE = 2 * math.pi * RING_RADIUS
 
 local FONT_FAMILY = noctalia.getSetting("shell.font_family") or "sans-serif"
+local cachedConfig = nil
+local dataDir = noctalia.pluginDataDir()
 
 local timers = {}
 local ringSeq = 0
 local ringPath = nil
+local ringSvg = nil
+local lastTooltip = nil
+local currentInterval = nil
 local instanceId = nil
 
 local function setting(key, default)
@@ -32,7 +38,10 @@ local function setting(key, default)
 end
 
 local function config()
-  return {
+  if cachedConfig then
+    return cachedConfig
+  end
+  cachedConfig = {
     showText = setting("show_text", true),
     showCount = setting("show_count", true),
     showProgress = setting("show_progress", true),
@@ -43,6 +52,7 @@ local function config()
     idle = setting("idle_color", "primary"),
     useUrgency = setting("use_urgency_colors", true),
   }
+  return cachedConfig
 end
 
 local function xmlEscape(text)
@@ -61,6 +71,14 @@ local function instanceKey()
   return instanceId
 end
 
+local function setInterval(ms)
+  if ms == currentInterval then
+    return
+  end
+  currentInterval = ms
+  noctalia.setUpdateInterval(ms)
+end
+
 local function applyInterval()
   local running = false
   for _, timer in ipairs(timers) do
@@ -69,7 +87,7 @@ local function applyInterval()
       break
     end
   end
-  noctalia.setUpdateInterval(running and RUNNING_INTERVAL_MS or IDLE_INTERVAL_MS)
+  setInterval(running and RUNNING_INTERVAL_MS or IDLE_INTERVAL_MS)
 end
 
 local function timerTitle(timer)
@@ -83,8 +101,7 @@ local function color(role, fallback)
   return noctalia.getColor(role) or fallback
 end
 
-local function writeRing(timer, now, count, cfg, idle)
-  local dataDir = noctalia.pluginDataDir()
+local function writeRing(timer, now, count, cfg, idle, state)
   if not dataDir then
     return nil
   end
@@ -92,7 +109,7 @@ local function writeRing(timer, now, count, cfg, idle)
   if not idle and timer.seconds > 0 then
     fraction = math.clamp(timersLib.remainingMs(timer, now) / (timer.seconds * 1000), 0, 1)
   end
-  local role = idle and cfg.idle or urgency.role(timer, now, cfg)
+  local role = idle and cfg.idle or urgency.role(timer, now, cfg, state)
   local arcColor = color(role, "#CBA6F7")
   local trackColor = color("outline_variant", "#4C4F69")
   local offset = RING_CIRCUMFERENCE * (1 - fraction)
@@ -111,6 +128,9 @@ local function writeRing(timer, now, count, cfg, idle)
     RING_RADIUS, trackColor, RING_STROKE,
     RING_RADIUS, arcColor, RING_STROKE, RING_CIRCUMFERENCE, offset,
     countText)
+  if svg == ringSvg and ringPath then
+    return ringPath
+  end
   ringSeq = ringSeq + 1
   local path = dataDir .. "/ring-" .. instanceKey() .. "-" .. ringSeq .. ".svg"
   local ok = noctalia.writeFile(path, svg)
@@ -120,6 +140,7 @@ local function writeRing(timer, now, count, cfg, idle)
   if ringPath then
     noctalia.removeFile(ringPath)
   end
+  ringSvg = svg
   ringPath = path
   return path
 end
@@ -135,20 +156,31 @@ local function countBadge(count, role)
   })
 end
 
-local function tooltip()
-  if #timers == 0 then
-    return noctalia.tr("bar.empty")
+local function setTooltip(value, signature)
+  if signature == lastTooltip then
+    return
   end
-  local now = noctalia.nowMs()
+  lastTooltip = signature
+  barWidget.setTooltip(value)
+end
+
+local function tooltip(now)
+  if #timers == 0 then
+    local value = noctalia.tr("bar.empty")
+    setTooltip(value, value)
+    return
+  end
   local rows = {}
+  local parts = {}
   for _, timer in ipairs(timers) do
     local left = duration.approx(timersLib.remainingSeconds(timer, now))
     if timer.paused then
       left = noctalia.tr("bar.paused", { time = left })
     end
     table.insert(rows, { key = timerTitle(timer), value = left })
+    table.insert(parts, timer.id .. "=" .. left)
   end
-  return rows
+  setTooltip(rows, table.concat(parts, "|"))
 end
 
 local function render()
@@ -157,7 +189,7 @@ local function render()
 
   if cfg.hideWhenIdle and #timers == 0 then
     barWidget.setVisible(false)
-    applyInterval()
+    setInterval(HIDDEN_INTERVAL_MS)
     return
   end
   barWidget.setVisible(true)
@@ -181,7 +213,7 @@ local function render()
   local children = {}
 
   if cfg.showProgress then
-    local path = writeRing(nearest, now, count, cfg, idle)
+    local path = writeRing(nearest, now, count, cfg, idle, state)
     if path then
       table.insert(children, ui.image({
         path = path,
@@ -208,7 +240,7 @@ local function render()
 
   local container = vertical and ui.column or ui.row
   barWidget.render(container({ gap = vertical and 3 or 6, align = "center" }, children))
-  barWidget.setTooltip(tooltip())
+  tooltip(now)
   applyInterval()
 end
 
@@ -230,5 +262,6 @@ function onExit()
   if ringPath then
     noctalia.removeFile(ringPath)
     ringPath = nil
+    ringSvg = nil
   end
 end

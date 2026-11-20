@@ -2,16 +2,31 @@
 -- Shared state helpers for the Timed bar widget, panel, and launcher.
 
 local M = {}
+local empty = {}
+local cached = nil
 
-local seq = tonumber(noctalia.state.get("timed.lastCommand")) or 0
+noctalia.state.watch("timed.list", function(value)
+  if type(value) == "table" and type(value.timers) == "table" then
+    cached = value.timers
+  else
+    cached = empty
+  end
+end)
 
 function M.list()
+  if cached then
+    return cached
+  end
   local state = noctalia.state.get("timed.list")
   if type(state) == "table" and type(state.timers) == "table" then
-    return state.timers
+    cached = state.timers
+    return cached
   end
-  return {}
+  cached = empty
+  return cached
 end
+
+local seq = tonumber(noctalia.state.get("timed.lastCommand")) or 0
 
 function M.send(command)
   seq = math.max(noctalia.nowMs(), seq + 1)

@@ -13,6 +13,7 @@ local DEFAULTS = {
   useUrgency = true,
 }
 
+local published = nil
 local function roleName(value, fallback)
   if type(value) == "string" and value ~= "" then
     return value
@@ -41,6 +42,14 @@ function M.colors()
 end
 
 function M.publish(colors)
+  local signature = table.concat({
+    colors.safe, colors.warning, colors.urgent, colors.idle,
+    colors.useUrgency and "1" or "0",
+  }, "|")
+  if signature == published then
+    return
+  end
+  published = signature
   noctalia.state.set("timed.colors", {
     safe = colors.safe,
     warning = colors.warning,
@@ -80,8 +89,8 @@ function M.roleForState(state, colors)
   return colors.safe
 end
 
-function M.role(timer, now, colors)
-  local state = M.state(timer, now)
+function M.role(timer, now, colors, knownState)
+  local state = knownState or M.state(timer, now)
   if state == "paused" then
     return "on_surface_variant"
   end

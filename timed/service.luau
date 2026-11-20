@@ -316,7 +316,7 @@ function update()
   if expire(now) then
     publish()
   end
-  schedule(now)
+  schedule()
 end
 
 function onResume()
@@ -324,7 +324,7 @@ function onResume()
   if expire(now) then
     publish()
   end
-  schedule(now)
+  schedule()
 end
 
 function onIpc(event, payload)

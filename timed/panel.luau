@@ -19,7 +19,7 @@ local function subtitle(timer, remaining, timeFormat, dateFormat)
   if timer.paused then
     return noctalia.tr("panel.paused_left")
   end
-  local format = remaining >= 86400 and noctalia.dateFormat() or noctalia.timeFormat()
+  local format = remaining >= 86400 and dateFormat or timeFormat
   return noctalia.tr("panel.ends_at", {
     time = noctalia.formatTime(format, timer.endsAt // 1000),
   })

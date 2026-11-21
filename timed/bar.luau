@@ -36,6 +36,7 @@ local cachedConfig = nil
 local timers = {}
 local ringSvg = nil
 local imageSet = false
+local usingFallback = false
 local lastTooltip = nil
 local lastText = nil
 local lastTextColor = nil
@@ -244,21 +245,26 @@ local function render()
     badgeRole = cfg.safe
   end
 
-  local showingRing = cfg.showProgress and writeRing(nearest, now, count, cfg, idle, state)
-  if not showingRing and not imageSet then
+  if usingFallback then
     renderFallback(nearest, count, cfg, badgeRole, vertical, now, state)
   else
-    local text = ""
-    local textColor = "on_surface"
-    if nearest and cfg.showText and not vertical then
-      text = duration.approx(timersLib.remainingSeconds(nearest, now))
-      if state == "paused" then
-        textColor = "on_surface_variant"
-      elseif cfg.useUrgency and (state == "warning" or state == "urgent") then
-        textColor = badgeRole
+    local showingRing = cfg.showProgress and writeRing(nearest, now, count, cfg, idle, state)
+    if not showingRing then
+      usingFallback = true
+      renderFallback(nearest, count, cfg, badgeRole, vertical, now, state)
+    else
+      local text = ""
+      local textColor = "on_surface"
+      if nearest and cfg.showText and not vertical then
+        text = duration.approx(timersLib.remainingSeconds(nearest, now))
+        if state == "paused" then
+          textColor = "on_surface_variant"
+        elseif cfg.useUrgency and (state == "warning" or state == "urgent") then
+          textColor = badgeRole
+        end
       end
+      setLabel(text, textColor)
     end
-    setLabel(text, textColor)
   end
 
   tooltip(now)

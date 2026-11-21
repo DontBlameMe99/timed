@@ -22,8 +22,8 @@ The plugin requires a Noctalia release with plugin API 48 or newer.
 
 Add the `dontblameme/timed:timed_indicator` widget to a bar. It shows the
 timer count inside a progress ring for the nearest timer, plus the remaining
-time. Hover it to list every timer with its message and remaining time. Click
-it to open the timer panel.
+time. Hover it to list every timer with its message and remaining time. Left-click
+it to open the timer panel. Right-click it to pause or resume the nearest timer.
 
 The ring uses the theme color. With timer colors enabled, it switches from the
 safe color to the warning and urgent colors based on how much of the timer is

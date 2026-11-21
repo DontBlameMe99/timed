@@ -50,6 +50,9 @@ jobs:
       - name: Test duration parsing
         run: luau tests/duration_test.luau
 
+      - name: Test timer commands
+        run: luau tests/timers_test.luau -a "$(cat timed/lib/timers.luau)"
+
       - name: Install luau-lsp
         env:
           LUAU_LSP_VERSION: "1.70.1"

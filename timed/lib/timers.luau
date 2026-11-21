@@ -33,6 +33,15 @@ function M.send(command)
   command.n = seq
   noctalia.state.set("timed.command", command)
 end
+function M.toggle(timer)
+  if not timer then
+    return
+  end
+  M.send({
+    action = timer.paused and "resume" or "pause",
+    id = timer.id,
+  })
+end
 
 function M.remainingMs(timer, now)
   if timer.paused then

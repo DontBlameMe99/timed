@@ -18,16 +18,28 @@ local RING_STROKE = 4
 local RING_CIRCUMFERENCE = 2 * math.pi * RING_RADIUS
 
 local FONT_FAMILY = noctalia.getSetting("shell.font_family") or "sans-serif"
-local cachedConfig = nil
 local dataDir = noctalia.pluginDataDir()
-
-local timers = {}
-local ringSeq = 0
-local ringPath = nil
-local ringSvg = nil
-local lastTooltip = nil
-local currentInterval = nil
 local instanceId = nil
+
+local function instanceKey()
+  if not instanceId then
+    local output = barWidget.outputName() or "bar"
+    instanceId = (output .. "-" .. tostring(noctalia.nowMs())):gsub("[^%w_-]", "_")
+  end
+  return instanceId
+end
+
+local ringPath = dataDir and (dataDir .. "/ring-" .. instanceKey() .. ".svg")
+local tmpPath = ringPath and (ringPath .. ".tmp")
+
+local cachedConfig = nil
+local timers = {}
+local ringSvg = nil
+local imageSet = false
+local lastTooltip = nil
+local lastText = nil
+local lastTextColor = nil
+local currentInterval = nil
 
 local function setting(key, default)
   local value = noctalia.getConfig(key)
@@ -63,14 +75,6 @@ local function xmlEscape(text)
     :gsub(">", "&gt;")
 end
 
-local function instanceKey()
-  if not instanceId then
-    local output = barWidget.outputName() or "bar"
-    instanceId = (output .. "-" .. tostring(noctalia.nowMs())):gsub("[^%w_-]", "_")
-  end
-  return instanceId
-end
-
 local function setInterval(ms)
   if ms == currentInterval then
     return
@@ -101,9 +105,49 @@ local function color(role, fallback)
   return noctalia.getColor(role) or fallback
 end
 
+local function setLabel(text, role)
+  if text ~= lastText then
+    barWidget.setText(text)
+    lastText = text
+  end
+  if role ~= lastTextColor then
+    barWidget.setColor(role)
+    lastTextColor = role
+  end
+end
+
+local function countBadge(count, role)
+  return ui.row({
+    fill = role .. "/0.18",
+    radius = 6,
+    paddingH = 5,
+    align = "center",
+  }, {
+    ui.label({ text = tostring(count), color = role, fontWeight = "bold", fontSize = 12 }),
+  })
+end
+
+local function renderFallback(nearest, count, cfg, badgeRole, vertical, now, state)
+  local children = {}
+  if cfg.showCount then
+    table.insert(children, countBadge(count, badgeRole))
+  end
+  if nearest and cfg.showText and not vertical then
+    local timeLabel = { text = duration.approx(timersLib.remainingSeconds(nearest, now)) }
+    if state == "paused" then
+      timeLabel.color = "on_surface_variant"
+    elseif cfg.useUrgency and (state == "warning" or state == "urgent") then
+      timeLabel.color = badgeRole
+    end
+    table.insert(children, ui.label(timeLabel))
+  end
+  local container = vertical and ui.column or ui.row
+  barWidget.render(container({ gap = vertical and 3 or 6, align = "center" }, children))
+end
+
 local function writeRing(timer, now, count, cfg, idle, state)
-  if not dataDir then
-    return nil
+  if not ringPath then
+    return false
   end
   local fraction = 1
   if not idle and timer.seconds > 0 then
@@ -128,32 +172,21 @@ local function writeRing(timer, now, count, cfg, idle, state)
     RING_RADIUS, trackColor, RING_STROKE,
     RING_RADIUS, arcColor, RING_STROKE, RING_CIRCUMFERENCE, offset,
     countText)
-  if svg == ringSvg and ringPath then
-    return ringPath
+  if svg ~= ringSvg then
+    local ok = noctalia.writeFile(tmpPath, svg)
+    if ok then
+      ok = noctalia.renameFile(tmpPath, ringPath)
+    end
+    if not ok then
+      return false
+    end
+    ringSvg = svg
   end
-  ringSeq = ringSeq + 1
-  local path = dataDir .. "/ring-" .. instanceKey() .. "-" .. ringSeq .. ".svg"
-  local ok = noctalia.writeFile(path, svg)
-  if not ok then
-    return nil
+  if not imageSet then
+    barWidget.setImage(ringPath, true, RING_SIZE, RING_SIZE)
+    imageSet = true
   end
-  if ringPath then
-    noctalia.removeFile(ringPath)
-  end
-  ringSvg = svg
-  ringPath = path
-  return path
-end
-
-local function countBadge(count, role)
-  return ui.row({
-    fill = role .. "/0.18",
-    radius = 6,
-    paddingH = 5,
-    align = "center",
-  }, {
-    ui.label({ text = tostring(count), color = role, fontWeight = "bold", fontSize = 12 }),
-  })
+  return true
 end
 
 local function setTooltip(value, signature)
@@ -210,36 +243,24 @@ local function render()
   else
     badgeRole = cfg.safe
   end
-  local children = {}
 
-  if cfg.showProgress then
-    local path = writeRing(nearest, now, count, cfg, idle, state)
-    if path then
-      table.insert(children, ui.image({
-        path = path,
-        width = RING_SIZE,
-        height = RING_SIZE,
-        fit = "contain",
-      }))
-    elseif cfg.showCount then
-      table.insert(children, countBadge(count, badgeRole))
+  local showingRing = cfg.showProgress and writeRing(nearest, now, count, cfg, idle, state)
+  if not showingRing and not imageSet then
+    renderFallback(nearest, count, cfg, badgeRole, vertical, now, state)
+  else
+    local text = ""
+    local textColor = "on_surface"
+    if nearest and cfg.showText and not vertical then
+      text = duration.approx(timersLib.remainingSeconds(nearest, now))
+      if state == "paused" then
+        textColor = "on_surface_variant"
+      elseif cfg.useUrgency and (state == "warning" or state == "urgent") then
+        textColor = badgeRole
+      end
     end
-  elseif cfg.showCount then
-    table.insert(children, countBadge(count, badgeRole))
+    setLabel(text, textColor)
   end
 
-  if nearest and cfg.showText and not vertical then
-    local timeLabel = { text = duration.approx(timersLib.remainingSeconds(nearest, now)) }
-    if state == "paused" then
-      timeLabel.color = "on_surface_variant"
-    elseif cfg.useUrgency and (state == "warning" or state == "urgent") then
-      timeLabel.color = badgeRole
-    end
-    table.insert(children, ui.label(timeLabel))
-  end
-
-  local container = vertical and ui.column or ui.row
-  barWidget.render(container({ gap = vertical and 3 or 6, align = "center" }, children))
   tooltip(now)
   applyInterval()
 end
@@ -261,7 +282,6 @@ end
 function onExit()
   if ringPath then
     noctalia.removeFile(ringPath)
-    ringPath = nil
-    ringSvg = nil
+    noctalia.removeFile(tmpPath)
   end
 end

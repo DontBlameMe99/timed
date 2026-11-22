@@ -1,6 +1,7 @@
 --!nonstrict
 -- Timed bar widget. Shows the nearest timer as a progress ring with the timer
--- count inside, plus the estimated remaining time. Clicking opens the panel.
+-- count inside, plus the estimated remaining time. Left-clicking opens the
+-- panel; right-clicking pauses or resumes the nearest timer.
 
 local duration = require("./lib/duration.luau")
 local timersLib = require("./lib/timers.luau")
@@ -283,6 +284,10 @@ end)
 
 function onClick()
   noctalia.togglePanel(PANEL_ID)
+end
+
+function onRightClick()
+  timersLib.toggle(timers[1])
 end
 
 function onExit()

@@ -15,7 +15,6 @@ on:
 
 permissions:
   contents: write
-  pull-requests: write
 
 concurrency:
   group: release
@@ -27,10 +26,12 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
     steps:
+      # A write deploy key is the actor that bypasses the main ruleset here.
       - name: Checkout repository
         uses: actions/checkout@v7
         with:
           ref: main
+          ssh-key: ${{ secrets.RELEASE_DEPLOY_KEY }}
 
       - name: Bump the version
         id: bump
@@ -41,35 +42,20 @@ jobs:
       - name: Check the catalog
         run: python3 .github/scripts/check-catalog.py
 
-      - name: Push the release branch
+      - name: Push the version bump
         env:
           VERSION: ${{ steps.bump.outputs.version }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git switch --create "release/$VERSION"
           git add timed/plugin.toml catalog.toml
           git commit --message "chore: bump version to $VERSION"
-          expected="$(git ls-remote origin "refs/heads/release/$VERSION" | cut -f1)"
-          git push --force-with-lease="refs/heads/release/$VERSION:$expected" origin "HEAD:release/$VERSION"
+          git push origin HEAD:main
 
-      - name: Open the release pull request
+      - name: Publish the release
         env:
           VERSION: ${{ steps.bump.outputs.version }}
         run: |
-          state="$(gh pr view "release/$VERSION" --json state --jq .state 2>/dev/null || true)"
-          if [ -z "$state" ]; then
-            gh pr create --base main --head "release/$VERSION" \
-              --title "chore: bump version to $VERSION" \
-              --body "Bumps the version in \`timed/plugin.toml\` and \`catalog.toml\` to $VERSION."
-          elif [ "$state" = "CLOSED" ]; then
-            gh pr reopen "release/$VERSION"
-          fi
-
-      - name: Merge the release pull request
-        env:
-          VERSION: ${{ steps.bump.outputs.version }}
-        run: |
-          if [ "$(gh pr view "release/$VERSION" --json state --jq .state)" != "MERGED" ]; then
-            gh pr merge "release/$VERSION" --squash --auto
-          fi
+          git tag "v$VERSION"
+          git push origin "v$VERSION"
+          gh release create "v$VERSION" --title "v$VERSION" --generate-notes --verify-tag

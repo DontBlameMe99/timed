@@ -203,7 +203,6 @@ impl Coarse {
         Self::Minutes(minutes)
     }
 
-    /// Days, or years once the rounded count reaches one.
     fn days(total: i64) -> Self {
         let days = rounded(total, DAY);
         if days >= 365 {
@@ -212,9 +211,41 @@ impl Coarse {
         Self::Days(days)
     }
 
-    /// Hours, or a single day once the rounded count reaches one.
     fn hours(total: i64) -> Self {
         let hours = rounded(total, HOUR);
+        if hours >= 24 {
+            return Self::Days(1);
+        }
+        Self::Hours(hours)
+    }
+
+    fn of_ms(milliseconds: i64) -> Self {
+        let total = milliseconds.max(0);
+        if total > DAY.saturating_sub(1).saturating_mul(1_000) {
+            return Self::days_ms(total);
+        }
+        if total > HOUR.saturating_sub(1).saturating_mul(1_000) {
+            return Self::hours_ms(total);
+        }
+        let minutes = rounded_ms(total, MINUTE).max(1);
+        if minutes >= 60 {
+            return Self::Hours(1);
+        }
+        Self::Minutes(minutes)
+    }
+
+    /// Days, or years once the rounded count reaches one.
+    fn days_ms(total: i64) -> Self {
+        let days = rounded_ms(total, DAY);
+        if days >= 365 {
+            return Self::Years(rounded(days, 365));
+        }
+        Self::Days(days)
+    }
+
+    /// Hours, or a single day once the rounded count reaches one.
+    fn hours_ms(total: i64) -> Self {
+        let hours = rounded_ms(total, HOUR);
         if hours >= 24 {
             return Self::Days(1);
         }
@@ -237,11 +268,31 @@ fn rounded(value: i64, divisor: i64) -> i64 {
     quotient(value.saturating_add(quotient(divisor, 2)), divisor)
 }
 
+fn rounded_ms(milliseconds: i64, unit_seconds: i64) -> i64 {
+    let unit = unit_seconds.saturating_mul(1_000);
+    quotient(
+        milliseconds
+            .saturating_add(999)
+            .saturating_add(quotient(unit, 2)),
+        unit,
+    )
+}
+
 /// Allocation-free identity of the string `approx` would return. Render
 /// caches use it to tell when the coarse countdown actually moves.
 #[must_use]
 pub fn approx_token(seconds: i64) -> u64 {
-    match Coarse::of(seconds) {
+    coarse_token(Coarse::of(seconds))
+}
+
+/// Allocation-free identity of `approx` for a remaining millisecond value.
+#[must_use]
+pub fn approx_token_ms(milliseconds: i64) -> u64 {
+    coarse_token(Coarse::of_ms(milliseconds))
+}
+
+fn coarse_token(coarse: Coarse) -> u64 {
+    match coarse {
         Coarse::Years(value) => 1_000_000_u64.saturating_add(as_u64(value)),
         Coarse::Days(value) => 2_000_000_u64.saturating_add(as_u64(value)),
         Coarse::Hours(value) => 4_000_000_u64.saturating_add(as_u64(value)),
@@ -369,6 +420,59 @@ mod tests {
         }
         for text in cases {
             assert_eq!(split(&text), reference_split(&text), "{text}");
+        }
+    }
+
+    #[expect(
+        clippy::excessive_nesting,
+        reason = "the test checks every millisecond around each unit boundary"
+    )]
+    #[test]
+    fn millisecond_tokens_match_rounded_seconds() {
+        for seconds in [
+            0,
+            1,
+            29,
+            30,
+            59,
+            60,
+            3_569,
+            3_570,
+            3_599,
+            3_600,
+            HOUR.saturating_mul(24).saturating_sub(1),
+            HOUR.saturating_mul(24),
+            DAY.saturating_mul(365).saturating_sub(1),
+            DAY.saturating_mul(365),
+            MAX_SECONDS,
+        ] {
+            for offset in 0..1_000 {
+                let milliseconds =
+                    seconds.saturating_mul(1_000).saturating_add(offset);
+                let rounded_seconds =
+                    seconds.saturating_add(i64::from(offset != 0));
+                assert_eq!(
+                    approx_token_ms(milliseconds),
+                    approx_token(rounded_seconds)
+                );
+            }
+        }
+        for milliseconds in [
+            0,
+            1,
+            29_999,
+            30_000,
+            30_001,
+            3_569_999,
+            3_570_000,
+            HOUR.saturating_mul(1_000).saturating_sub(1),
+            HOUR.saturating_mul(1_000),
+            DAY.saturating_mul(1_000).saturating_sub(1),
+            DAY.saturating_mul(1_000),
+        ] {
+            let seconds = quotient(milliseconds, 1_000)
+                .saturating_add(i64::from(remainder(milliseconds, 1_000) != 0));
+            assert_eq!(approx_token_ms(milliseconds), approx_token(seconds));
         }
     }
 }

@@ -67,6 +67,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --release
 python3 .github/scripts/check-catalog.py
 cargo deny check
+cargo bench --bench perf -- --case launcher_list
 ```
 
 `timed/` must match a fresh `emit`, which CI checks with `diff`. The formatting,

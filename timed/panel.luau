@@ -20,8 +20,14 @@ function onAudioSpectrum(valuesCsv, stateCsv) bridge.call("audio_spectrum", { va
 function onSuspend() bridge.call("suspend") end
 function onResume() bridge.call("resume") end
 function onRefresh() bridge.call("refresh") end
-function onOpen(context) bridge.call("open", { context = context }) end
-function onClose() bridge.call("close") end
+function onOpen(context)
+  panel.setWantsSecondTicks(true)
+  bridge.call("open", { context = context })
+end
+function onClose()
+  panel.setWantsSecondTicks(false)
+  bridge.call("close")
+end
 function onCloseClicked() bridge.call("close_clicked") end
 function onRefreshClicked() bridge.call("refresh_clicked") end
 function onSettingsClicked() bridge.call("settings_clicked") end
@@ -34,5 +40,4 @@ function onSearch(text) bridge.call("search", { text = text }) end
 function onSearchChange(text) bridge.call("search_change", { text = text }) end
 function update() bridge.call("render", { source = "update" }) end
 bridge.watch_state(function() bridge.call("render", { source = "state" }) end)
-panel.setWantsSecondTicks(true)
 bridge.call("render", { source = "load" })

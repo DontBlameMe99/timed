@@ -1,9 +1,8 @@
 //! Progress-based timer colors shared by the bar widget and the panel.
 
-use std::sync::Mutex;
-
 use noctalia_rs::{Context, Op};
 use serde_json::{Value, json};
+use std::sync::{Arc, Mutex};
 
 use crate::sync::lock;
 use crate::timer::{COLORS_KEY, Timer};
@@ -20,13 +19,18 @@ pub enum State {
 impl State {
     #[must_use]
     pub fn of(timer: &Timer, now: i64) -> Self {
+        Self::of_remaining(timer, timer.remaining_ms(now))
+    }
+
+    #[must_use]
+    pub(crate) const fn of_remaining(timer: &Timer, remaining: i64) -> Self {
         if timer.paused {
             return Self::Paused;
         }
-        if timer.within(now, 20) {
+        if timer.within_ms(remaining, 20) {
             return Self::Urgent;
         }
-        if timer.within(now, 50) {
+        if timer.within_ms(remaining, 50) {
             return Self::Warning;
         }
         Self::Safe
@@ -180,25 +184,27 @@ impl Published {
     }
 }
 
-static MIRROR: Mutex<Option<Colors>> = Mutex::new(None);
+static MIRROR: Mutex<Option<Arc<Colors>>> = Mutex::new(None);
 
 /// Panel-side cache: the widget publishes its colors, so read them once and
 /// follow changes instead of querying on every render.
 #[must_use]
-pub fn panel_colors(ctx: &Context) -> (Colors, Vec<Op>) {
+pub fn panel_colors(ctx: &Context) -> (Arc<Colors>, Vec<Op>) {
     let mut mirror = lock(&MIRROR);
     let mut ops = Vec::new();
     if mirror.is_none() {
         let value = ctx.global_state(COLORS_KEY);
-        *mirror = Some(Colors::from_value(value.as_ref()));
+        *mirror = Some(Arc::new(Colors::from_value(value.as_ref())));
         ops.push(Op::state_watch(COLORS_KEY, "colors"));
     }
-    let colors = mirror.clone().unwrap_or_else(Colors::defaults);
+    let colors = mirror
+        .clone()
+        .unwrap_or_else(|| Arc::new(Colors::defaults()));
     (colors, ops)
 }
 
 pub fn store_colors(value: Option<&Value>) {
-    *lock(&MIRROR) = Some(Colors::from_value(value));
+    *lock(&MIRROR) = Some(Arc::new(Colors::from_value(value)));
 }
 
 #[cfg(test)]

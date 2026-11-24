@@ -74,6 +74,11 @@ publish = false
 [lints]
 workspace = true
 
+[[bench]]
+name = "perf"
+harness = false
+path = "benches/perf.rs"
+
 [dependencies]
 noctalia-rs = "0.2.1"
 serde = { version = "1", features = ["derive"] }

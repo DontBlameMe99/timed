@@ -59,6 +59,7 @@ struct Memo {
     config: Option<Value>,
     colors: Option<Value>,
     bar: Option<Value>,
+    revision: Option<i64>,
     setting: Option<Value>,
     timers: Vec<Timer>,
     tokens: Vec<u64>,
@@ -83,6 +84,7 @@ impl Widget {
                 config: None,
                 colors: None,
                 bar: None,
+                revision: None,
                 setting: None,
                 timers: Vec::new(),
                 tokens: Vec::new(),
@@ -99,20 +101,25 @@ static WIDGET: Mutex<Widget> = Mutex::new(Widget::new());
 /// of the drawn clock or ring, forces a fresh tree.
 fn memo_hit(ctx: &Context, widget: &mut Widget) -> bool {
     let memo = &mut widget.memo;
+    let state = ctx.state.get("timers");
+    let revision = timer::state_revision(ctx);
+    let state_changed = match (memo.revision, revision) {
+        (Some(previous), Some(current)) => previous != current,
+        _ => memo.state.as_ref() != state,
+    };
+    if state_changed {
+        memo.revision = revision;
+        memo.state = state.cloned();
+        memo.timers = timer::list(ctx);
+    }
     if ctx.event != "render"
-        || ctx.payload_str("source").as_deref() == Some("load")
+        || ctx.render_source() == "load"
         || ctx.setting("shell.font_family").is_none()
     {
         memo.valid = false;
         return false;
     }
 
-    let state = ctx.state.get("timers");
-    let state_changed = memo.state.as_ref() != state;
-    if state_changed {
-        memo.state = state.cloned();
-        memo.timers = timer::list(ctx);
-    }
     let config_changed = memo.config.as_ref() != Some(&ctx.config);
     if config_changed {
         memo.config = Some(ctx.config.clone());
@@ -136,13 +143,15 @@ fn memo_hit(ctx: &Context, widget: &mut Widget) -> bool {
     memo.scratch.clear();
     for timer in &memo.timers {
         memo.scratch
-            .push(duration::approx_token(timer.remaining_seconds(now)));
+            .push(duration::approx_token_ms(timer.remaining_ms(now)));
         memo.scratch.push(u64::from(timer.paused));
     }
     if let Some(nearest) = memo.timers.first() {
+        let remaining = nearest.remaining_ms(now);
         memo.scratch
-            .push(u64::from(nearest.fraction_step(now, RING_STEPS)));
-        memo.scratch.push(State::of(nearest, now).token());
+            .push(u64::from(nearest.fraction_step_ms(remaining, RING_STEPS)));
+        memo.scratch
+            .push(State::of_remaining(nearest, remaining).token());
     }
     memo.scratch
         .push(u64::from(memo.timers.iter().any(|timer| !timer.paused)));
@@ -180,6 +189,17 @@ fn render(ctx: &Context, widget: &mut Widget) -> Vec<Op> {
     if memo_hit(ctx, widget) {
         return Vec::new();
     }
+    let timers = mem::take(&mut widget.memo.timers);
+    let ops = render_timers(ctx, widget, &timers);
+    widget.memo.timers = timers;
+    ops
+}
+
+fn render_timers(
+    ctx: &Context,
+    widget: &mut Widget,
+    timers: &[Timer],
+) -> Vec<Op> {
     let config = Config::read(ctx);
     let colors = &config.colors;
     let mut ops = Vec::new();
@@ -188,7 +208,6 @@ fn render(ctx: &Context, widget: &mut Widget) -> Vec<Op> {
         ops.push(op);
     }
 
-    let timers = timer::list(ctx);
     if config.hide_when_idle && timers.is_empty() {
         ops.push(Op::BarVisible { visible: false });
         set_interval(widget, HIDDEN_INTERVAL_MS, &mut ops);
@@ -235,14 +254,7 @@ fn render(ctx: &Context, widget: &mut Widget) -> Vec<Op> {
         }
     }
 
-    if let Some(value) = tooltip(
-        ctx,
-        widget,
-        &Tooltip {
-            timers: &timers,
-            now,
-        },
-    ) {
+    if let Some(value) = tooltip(ctx, widget, &Tooltip { timers, now }) {
         ops.push(Op::BarTooltip { value });
     }
     let running = timers.iter().any(|timer| !timer.paused);
@@ -619,9 +631,10 @@ static FONT: Mutex<Option<String>> = Mutex::new(None);
 fn font_family(ctx: &Context) -> String {
     let mut font = lock(&FONT);
     font.get_or_insert_with(|| {
-        ctx.setting_value("shell.font_family")
-            .and_then(|value| value.as_str().map(str::to_owned))
-            .unwrap_or_else(|| "sans-serif".to_owned())
+        ctx.setting("shell.font_family")
+            .and_then(Value::as_str)
+            .unwrap_or("sans-serif")
+            .to_owned()
     })
     .clone()
 }
@@ -736,6 +749,7 @@ mod tests {
                 "bar": { "vertical": false, "output_name": "DP-1" },
                 "colors": { "tertiary": color },
                 "setting": { "shell.font_family": "sans-serif" },
+                "timed_state_version": 0,
             })
         };
         let mut widget = Widget::new();
@@ -749,11 +763,13 @@ mod tests {
         assert!(!render(&context, &mut widget).is_empty());
         assert!(render(&context, &mut widget).is_empty());
 
+        let mut changed_host = host("#111111");
+        changed_host["timed_state_version"] = json!(1);
         let changed = test_context::context(
             "render",
             config.clone(),
             timers("changed"),
-            host("#111111"),
+            changed_host,
         );
         assert!(!render(&changed, &mut widget).is_empty());
 

@@ -1,9 +1,8 @@
 //! Timed panel: list timers, pause or resume them, stop them, and start new
 //! ones.
 
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::mem;
+use std::sync::Arc;
 use std::sync::Mutex;
 
 use noctalia_rs::{Context, Op, Props, Result, ui};
@@ -24,7 +23,6 @@ struct Panel {
     new_text: String,
     input_key: i64,
     error: Option<String>,
-    signature: Option<u64>,
     memo: PanelMemo,
 }
 
@@ -32,7 +30,8 @@ struct Panel {
 struct PanelMemo {
     valid: bool,
     state: Option<Value>,
-    colors: Option<Colors>,
+    revision: Option<i64>,
+    colors: Option<Arc<Colors>>,
     time_format: Option<String>,
     date_format: Option<String>,
     input_key: i64,
@@ -49,10 +48,10 @@ impl Panel {
             new_text: String::new(),
             input_key: 0,
             error: None,
-            signature: None,
             memo: PanelMemo {
                 valid: false,
                 state: None,
+                revision: None,
                 colors: None,
                 time_format: None,
                 date_format: None,
@@ -74,20 +73,25 @@ static PANEL: Mutex<Panel> = Mutex::new(Panel::new());
 fn memo_hit(ctx: &Context, panel: &mut Panel, view: &View<'_>) -> bool {
     let clock = view.clock;
     let memo = &mut panel.memo;
+    let state = ctx.state.get("timers");
+    let revision = timer::state_revision(ctx);
+    let state_changed = match (memo.revision, revision) {
+        (Some(previous), Some(current)) => previous != current,
+        _ => memo.state.as_ref() != state,
+    };
+    if state_changed {
+        memo.revision = revision;
+        memo.state = state.cloned();
+        memo.timers = timer::list(ctx);
+    }
     if ctx.event != "render" || !panel.open {
         memo.valid = false;
         return false;
     }
 
-    let state = ctx.state.get("timers");
-    let state_changed = memo.state.as_ref() != state;
-    if state_changed {
-        memo.state = state.cloned();
-        memo.timers = timer::list(ctx);
-    }
     let colors_changed = memo.colors.as_ref() != Some(view.colors);
     if colors_changed {
-        memo.colors = Some(view.colors.clone());
+        memo.colors = Some(Arc::clone(view.colors));
     }
     let formats_changed = memo.time_format.as_deref()
         != Some(clock.time.as_str())
@@ -109,14 +113,16 @@ fn memo_hit(ctx: &Context, panel: &mut Panel, view: &View<'_>) -> bool {
     let now = clock.now;
     memo.scratch.clear();
     for timer in &memo.timers {
-        memo.scratch
-            .push(u64::from(timer.fraction_step(now, PANEL_STEPS)));
-        memo.scratch
-            .push(duration::approx_token(timer.remaining_seconds(now)));
-        memo.scratch.push(State::of(timer, now).token());
-        let mut hasher = DefaultHasher::new();
-        timer.ends_at_text(ctx, clock).hash(&mut hasher);
-        memo.scratch.push(hasher.finish());
+        let remaining = timer.remaining_ms(now);
+        let state = State::of_remaining(timer, remaining).token();
+        let long = u64::from(
+            remaining > duration::DAY.saturating_sub(1).saturating_mul(1_000),
+        );
+        memo.scratch.push(
+            u64::from(timer.fraction_step_ms(remaining, PANEL_STEPS))
+                | ((state | (long << 2)) << 16),
+        );
+        memo.scratch.push(duration::approx_token_ms(remaining));
     }
 
     if memo.valid && memo.scratch == memo.tokens {
@@ -140,7 +146,6 @@ pub fn update(ctx: &Context) -> Result<Vec<Op>> {
             panel.new_text.clear();
             panel.error = None;
             panel.input_key = panel.input_key.saturating_add(1);
-            panel.signature = None;
             Ok(render(ctx, &mut panel))
         }
         "close" => {
@@ -167,12 +172,11 @@ pub fn update(ctx: &Context) -> Result<Vec<Op>> {
 /// The parts of the render that come from the clock and the theme rather than
 /// from the timer list.
 struct View<'a> {
-    colors: &'a Colors,
+    colors: &'a Arc<Colors>,
     clock: &'a Clock,
 }
 
 /// One row's drawn values, shared by the change check and the tree.
-#[derive(Hash)]
 struct Row<'a> {
     timer: &'a Timer,
     state: State,
@@ -186,27 +190,17 @@ fn collect_rows<'a>(timers: &'a [Timer], view: &View<'_>) -> Vec<Row<'a>> {
     timers
         .iter()
         .map(|timer| {
-            let state = State::of(timer, now);
+            let remaining = timer.remaining_ms(now);
+            let state = State::of_remaining(timer, remaining);
             Row {
                 timer,
                 state,
-                step: timer.fraction_step(now, PANEL_STEPS),
+                step: timer.fraction_step_ms(remaining, PANEL_STEPS),
                 time: duration::approx(timer.remaining_seconds(now)),
                 role: state.role(view.colors),
             }
         })
         .collect()
-}
-
-/// A hash of everything the tree draws. The dashboard asks for a render every
-/// second, and rebuilding a 55 node tree costs more than checking this. The
-/// rows carry the drawn time, so the clock itself is left out.
-fn signature(panel: &Panel, view: &View<'_>, rows: &[Row<'_>]) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    let formats = (&view.clock.time, &view.clock.date);
-    (panel.input_key, &panel.error, formats, view.colors, rows)
-        .hash(&mut hasher);
-    hasher.finish()
 }
 
 fn render(ctx: &Context, panel: &mut Panel) -> Vec<Op> {
@@ -219,15 +213,8 @@ fn render(ctx: &Context, panel: &mut Panel) -> Vec<Op> {
     if memo_hit(ctx, panel, &view) {
         return ops;
     }
-
-    let timers = timer::list(ctx);
+    let timers = mem::take(&mut panel.memo.timers);
     let rows = collect_rows(&timers, &view);
-    let signature = signature(panel, &view, &rows);
-    if panel.signature == Some(signature) {
-        return ops;
-    }
-    panel.signature = Some(signature);
-
     let header = ui::row(
         Props::new()
             .text("align", "center")
@@ -253,6 +240,7 @@ fn render(ctx: &Context, panel: &mut Panel) -> Vec<Op> {
             vec![header, body, controls],
         ),
     });
+    panel.memo.timers = timers;
     ops
 }
 
@@ -566,14 +554,71 @@ mod tests {
         );
         assert!(render(&context, &mut panel).is_empty());
 
-        let changed =
-            test_context::context("render", json!({}), timers("changed"), host);
+        let mut changed_host = host;
+        changed_host["timed_state_version"] = json!(1);
+        let changed = test_context::context(
+            "render",
+            json!({}),
+            timers("changed"),
+            changed_host,
+        );
         assert!(
             render(&changed, &mut panel)
                 .iter()
                 .any(|op| serde_json::to_value(op).expect("op")["op"]
                     == json!("panel_render"))
         );
+    }
+    #[test]
+    fn memo_wakes_when_the_end_time_switches_to_a_date() {
+        let now: i64 = 1_800_000_000_000;
+        let end = now
+            .saturating_add(
+                duration::DAY.saturating_sub(1).saturating_mul(1_000),
+            )
+            .saturating_add(500);
+        let state = json!({ "timers": [{
+            "id": "one",
+            "seconds": 90_000,
+            "label": "long",
+            "paused": false,
+            "endsAt": end,
+        }] });
+        let host = json!({
+            "now_ms": now,
+            "timed_state_version": 0,
+            "setting": {
+                "shell.time_format": "%H:%M",
+                "shell.date_format": "%Y-%m-%d",
+            },
+        });
+        let ctx = test_context::context("render", json!({}), state, host);
+        let clock = Clock {
+            now,
+            time: "%H:%M".to_owned(),
+            date: "%Y-%m-%d".to_owned(),
+        };
+        let colors = Arc::new(Colors::defaults());
+        let view = View {
+            colors: &colors,
+            clock: &clock,
+        };
+        let mut panel = Panel::new();
+        panel.open = true;
+        assert!(!memo_hit(&ctx, &mut panel, &view));
+        assert!(memo_hit(&ctx, &mut panel, &view));
+
+        let mut later = ctx;
+        later.now_ms = now.saturating_add(1_000);
+        let later_clock = Clock {
+            now: later.now_ms,
+            ..clock
+        };
+        let view = View {
+            colors: &colors,
+            clock: &later_clock,
+        };
+        assert!(!memo_hit(&later, &mut panel, &view));
     }
 
     #[test]

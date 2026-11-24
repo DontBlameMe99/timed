@@ -109,5 +109,14 @@ jobs:
           curl -fsSL -o "$RUNNER_TEMP/noctalia.d.luau" \
             "https://raw.githubusercontent.com/noctalia-dev/official-plugins/$DEFINITIONS_COMMIT/noctalia.d.luau"
 
+      # The prelude and the cases are harness scaffolding: the Rust driver
+      # injects their globals ahead of the script, so only the reference
+      # implementation is analyzed.
       - name: Analyze Luau
-        run: luau-lsp analyze --definitions="$RUNNER_TEMP/noctalia.d.luau" bench/luau
+        run: |
+          luau-lsp analyze --definitions="$RUNNER_TEMP/noctalia.d.luau" \
+            bench/luau/lib \
+            bench/luau/bar.luau \
+            bench/luau/panel.luau \
+            bench/luau/launcher.luau \
+            bench/luau/service.luau

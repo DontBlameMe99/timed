@@ -75,17 +75,6 @@ impl Colors {
         }
     }
 
-    fn signature(&self) -> String {
-        format!(
-            "{}|{}|{}|{}|{}",
-            self.safe,
-            self.warning,
-            self.urgent,
-            self.idle,
-            if self.use_urgency { "1" } else { "0" }
-        )
-    }
-
     #[must_use]
     pub fn value(&self) -> Value {
         json!({
@@ -107,22 +96,21 @@ fn pick_role(value: Option<&str>, fallback: &str) -> String {
 
 #[derive(Clone, Debug, Default)]
 pub struct Published {
-    signature: Option<String>,
+    colors: Option<Colors>,
 }
 
 impl Published {
     #[must_use]
     pub const fn new() -> Self {
-        Self { signature: None }
+        Self { colors: None }
     }
 
     /// Publishes the widget colors for the panel, once per change.
     pub fn update(&mut self, colors: &Colors) -> Option<Op> {
-        let signature = colors.signature();
-        if self.signature.as_ref() == Some(&signature) {
+        if self.colors.as_ref() == Some(colors) {
             return None;
         }
-        self.signature = Some(signature);
+        self.colors = Some(colors.clone());
         Some(Op::state(COLORS_KEY, colors.value()))
     }
 }
@@ -178,14 +166,25 @@ pub fn role_for_state(state: &str, colors: &Colors) -> String {
 
 #[must_use]
 pub fn role(timer: &Timer, now: i64, colors: &Colors) -> String {
+    role_ref(timer, now, colors).to_owned()
+}
+
+/// Borrowed form for renders that only pass the role to an op or a string
+/// builder, so the common case allocates nothing.
+#[must_use]
+pub fn role_ref<'a>(timer: &Timer, now: i64, colors: &'a Colors) -> &'a str {
     let state = state(timer, now);
     if state == "paused" {
-        return "on_surface_variant".to_owned();
+        return "on_surface_variant";
     }
     if !colors.use_urgency {
-        return colors.safe.clone();
+        return &colors.safe;
     }
-    role_for_state(state, colors)
+    match state {
+        "urgent" => &colors.urgent,
+        "warning" => &colors.warning,
+        _ => &colors.safe,
+    }
 }
 
 #[cfg(test)]

@@ -1,10 +1,12 @@
 //! Shared timer state, persistence shape, and command channel.
 
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::sync::{
     Mutex, MutexGuard, PoisonError,
     atomic::{AtomicBool, Ordering as AtomicOrdering},
 };
+use std::thread_local;
 
 use noctalia_rs::{Context, Op};
 use serde::{Deserialize, Serialize};
@@ -102,6 +104,37 @@ pub struct List {
 #[must_use]
 pub fn list(ctx: &Context) -> Vec<Timer> {
     ctx.state_value::<Vec<Timer>>("timers").unwrap_or_default()
+}
+
+type TimeCache = Vec<(String, i64, String)>;
+
+thread_local! {
+    static TIMES: RefCell<TimeCache> = const { RefCell::new(Vec::new()) };
+}
+
+/// Formats a timer end time. The shell asks for the same end time on every
+/// render, so keep the last few results instead of formatting through chrono
+/// again each second.
+#[must_use]
+pub fn format_time(ctx: &Context, format: &str, seconds: i64) -> String {
+    if let Some(cached) = TIMES.with(|times| {
+        times
+            .borrow()
+            .iter()
+            .find(|(pattern, at, _)| pattern == format && *at == seconds)
+            .map(|(_, _, text)| text.clone())
+    }) {
+        return cached;
+    }
+    let text = ctx.format_time_at(format, Some(seconds), None);
+    TIMES.with(|slot| {
+        let mut cache = slot.borrow_mut();
+        if cache.len() >= 64 {
+            cache.remove(0);
+        }
+        cache.push((format.to_owned(), seconds, text.clone()));
+    });
+    text
 }
 
 pub fn sort(timers: &mut [Timer]) {

@@ -3,6 +3,7 @@
 
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::mem;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use noctalia_rs::{Context, Op, Props, Result, ui};
@@ -22,6 +23,21 @@ struct Panel {
     input_key: i64,
     error: Option<String>,
     signature: Option<u64>,
+    memo: PanelMemo,
+}
+
+#[derive(Default)]
+struct PanelMemo {
+    valid: bool,
+    state: Option<Value>,
+    colors: Option<Colors>,
+    time_format: Option<String>,
+    date_format: Option<String>,
+    input_key: i64,
+    error: Option<String>,
+    timers: Vec<Timer>,
+    tokens: Vec<u64>,
+    scratch: Vec<u64>,
 }
 
 impl Panel {
@@ -32,6 +48,18 @@ impl Panel {
             input_key: 0,
             error: None,
             signature: None,
+            memo: PanelMemo {
+                valid: false,
+                state: None,
+                colors: None,
+                time_format: None,
+                date_format: None,
+                input_key: 0,
+                error: None,
+                timers: Vec::new(),
+                tokens: Vec::new(),
+                scratch: Vec::new(),
+            },
         }
     }
 }
@@ -40,6 +68,82 @@ static PANEL: Mutex<Panel> = Mutex::new(Panel::new());
 
 fn lock() -> MutexGuard<'static, Panel> {
     PANEL.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Skips a render whose rows would draw exactly the same tree. The state,
+/// theme, input box, and the time each row displays are the only inputs the
+/// panel uses, so a cheap token list can decide before the tree is built.
+fn memo_hit(ctx: &Context, panel: &mut Panel, colors: &Colors) -> bool {
+    let memo = &mut panel.memo;
+    if ctx.event != "render" || !panel.open {
+        memo.valid = false;
+        return false;
+    }
+
+    let state = ctx.state.get("timers");
+    let state_changed = memo.state.as_ref() != state;
+    if state_changed {
+        memo.state = state.cloned();
+        memo.timers = timer::list(ctx);
+    }
+    let colors_changed = memo.colors.as_ref() != Some(colors);
+    if colors_changed {
+        memo.colors = Some(colors.clone());
+    }
+    let time_format = ctx.time_format().unwrap_or_default();
+    let date_format = ctx.date_format().unwrap_or_default();
+    let formats_changed = memo.time_format.as_deref()
+        != Some(time_format.as_str())
+        || memo.date_format.as_deref() != Some(date_format.as_str());
+    if formats_changed {
+        memo.time_format = Some(time_format.clone());
+        memo.date_format = Some(date_format.clone());
+    }
+    let controls_changed =
+        memo.input_key != panel.input_key || memo.error != panel.error;
+    if controls_changed {
+        memo.input_key = panel.input_key;
+        memo.error = panel.error.clone();
+    }
+    if state_changed || colors_changed || formats_changed || controls_changed {
+        memo.valid = false;
+    }
+
+    let now = ctx.now_ms;
+    memo.scratch.clear();
+    for timer in &memo.timers {
+        memo.scratch
+            .push(u64::from(timer.fraction_step(now, PANEL_STEPS)));
+        memo.scratch
+            .push(duration::approx_token(timer.remaining_seconds(now)));
+        let state = match urgency::state(timer, now) {
+            "paused" => 0,
+            "urgent" => 1,
+            "warning" => 2,
+            _ => 3,
+        };
+        memo.scratch.push(state);
+        let format = if timer.remaining_seconds(now) >= 86_400 {
+            &date_format
+        } else {
+            &time_format
+        };
+        let mut hasher = DefaultHasher::new();
+        timer::format_time(
+            ctx,
+            format,
+            timer.ends_at.unwrap_or(0).div_euclid(1_000),
+        )
+        .hash(&mut hasher);
+        memo.scratch.push(hasher.finish());
+    }
+
+    if memo.valid && memo.scratch == memo.tokens {
+        return true;
+    }
+    mem::swap(&mut memo.scratch, &mut memo.tokens);
+    memo.valid = true;
+    false
 }
 
 /// Handles one panel event.
@@ -142,6 +246,9 @@ fn signature(panel: &Panel, view: &View<'_>, rows: &[Row<'_>]) -> u64 {
 fn render(ctx: &Context, panel: &mut Panel) -> Vec<Op> {
     let timers = timer::list(ctx);
     let (colors, mut ops) = urgency::panel_colors(ctx);
+    if memo_hit(ctx, panel, &colors) {
+        return ops;
+    }
     let time_format = ctx.time_format().unwrap_or_default();
     let date_format = ctx.date_format().unwrap_or_default();
     let view = View {
@@ -351,7 +458,7 @@ fn subtitle(ctx: &Context, timer: &Timer, view: &View<'_>) -> String {
         view.time_format
     };
     let time = timer.ends_at.map_or_else(String::new, |end| {
-        ctx.format_time_at(format, Some(end.div_euclid(1_000)), None)
+        timer::format_time(ctx, format, end.div_euclid(1_000))
     });
     ctx.tr("panel.ends_at", &[("time", time)])
 }
@@ -478,5 +585,100 @@ mod tests {
         let subtitle = subtitle(&ctx, &timer, &view);
         assert!(subtitle.contains("Ends at"));
         assert!(subtitle.contains("2023"), "{subtitle}");
+    }
+
+    #[test]
+    fn memo_skips_an_identical_render_and_wakes_on_state_change() {
+        let now: i64 = 1_800_000_000_000;
+        urgency::store_colors(Some(&json!({ "useUrgency": true })));
+        let timers = |label: &str| {
+            json!({ "timers": [{
+                "id": "one",
+                "seconds": 600,
+                "label": label,
+                "paused": false,
+                "endsAt": now + 600_000,
+            }] })
+        };
+        let host = json!({
+            "now_ms": now,
+            "setting": {
+                "shell.time_format": "%H:%M",
+                "shell.date_format": "%Y-%m-%d",
+            },
+        });
+        let mut panel = Panel::new();
+        panel.open = true;
+        panel.input_key = 1;
+
+        let context = test_context::context(
+            "render",
+            json!({}),
+            timers("10m"),
+            host.clone(),
+        );
+        assert!(
+            render(&context, &mut panel)
+                .iter()
+                .any(|op| serde_json::to_value(op).expect("op")["op"]
+                    == json!("panel_render"))
+        );
+        assert!(render(&context, &mut panel).is_empty());
+
+        let changed =
+            test_context::context("render", json!({}), timers("changed"), host);
+        assert!(
+            render(&changed, &mut panel)
+                .iter()
+                .any(|op| serde_json::to_value(op).expect("op")["op"]
+                    == json!("panel_render"))
+        );
+    }
+
+    #[test]
+    fn memo_wakes_when_the_rounded_countdown_changes() {
+        let now: i64 = 1_800_000_000_000;
+        urgency::store_colors(Some(&json!({ "useUrgency": true })));
+        let state = json!({ "timers": [{
+            "id": "one",
+            "seconds": 100_000,
+            "label": "long",
+            "paused": false,
+            "endsAt": now + 48_610_000,
+        }] });
+        let host = json!({
+            "now_ms": now,
+            "setting": {
+                "shell.time_format": "%H:%M",
+                "shell.date_format": "%Y-%m-%d",
+            },
+        });
+        let mut panel = Panel::new();
+        panel.open = true;
+        panel.input_key = 1;
+
+        let first = test_context::context(
+            "render",
+            json!({}),
+            state.clone(),
+            host.clone(),
+        );
+        let ops = render(&first, &mut panel);
+        assert!(ops.iter().any(|op| {
+            serde_json::to_value(op)
+                .expect("op")
+                .to_string()
+                .contains("14h")
+        }));
+
+        let mut later = test_context::context("render", json!({}), state, host);
+        later.now_ms = now.saturating_add(20_000);
+        let ops = render(&later, &mut panel);
+        assert!(ops.iter().any(|op| {
+            serde_json::to_value(op)
+                .expect("op")
+                .to_string()
+                .contains("13h")
+        }));
     }
 }

@@ -34,6 +34,7 @@ use noctalia_rs::{Context, Op, Parts};
 use serde_json::{Value, json};
 
 const NOW: i64 = 1_800_000_000_000;
+const MAX_BATCH: usize = 10_000;
 const COLORS: &[(&str, &str)] = &[
     ("primary", "#CBA6F7"),
     ("secondary", "#F9E2AF"),
@@ -507,6 +508,7 @@ fn parse() -> Config {
             _ => process::exit(2),
         }
     }
+    config.batch = config.batch.min(MAX_BATCH);
     if !CASES.contains(&config.case.as_str()) {
         eprintln!("cases: {}", CASES.join(", "));
         process::exit(2);

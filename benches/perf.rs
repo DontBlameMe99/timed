@@ -34,7 +34,6 @@ use noctalia_rs::{Context, Op, Parts};
 use serde_json::{Value, json};
 
 const NOW: i64 = 1_800_000_000_000;
-const FUTURE_MS: i64 = 1_000_000_000;
 const COLORS: &[(&str, &str)] = &[
     ("primary", "#CBA6F7"),
     ("secondary", "#F9E2AF"),
@@ -107,15 +106,22 @@ impl Harness {
             .join(format!("perf-{case}-{}", process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("benchmark scratch directory");
+        let base = if case.starts_with("service") {
+            30_i64.saturating_mul(86_400)
+        } else {
+            14_400
+        };
         if case.starts_with("service") {
             fs::write(
                 dir.join("timers.json"),
-                serde_json::to_string(&json!({ "timers": timers(count) }))
-                    .expect("seed"),
+                serde_json::to_string(
+                    &json!({ "timers": timers(count, base) }),
+                )
+                .expect("seed"),
             )
             .expect("seed timers");
         }
-        let timers = timers(count);
+        let timers = timers(count, base);
         let state = json!({ "timers": timers });
         let host = host(NOW);
         let settings =
@@ -208,6 +214,15 @@ impl Harness {
         harness
     }
 
+    fn reset(&mut self, state: &Value) {
+        self.step = 0;
+        self.ctx.now_ms = NOW;
+        self.ctx.state = state.clone();
+        if let Some(host) = self.ctx.host.as_object_mut() {
+            host.insert("timed_state_version".to_owned(), json!(0));
+        }
+    }
+
     fn dispatch(&mut self, case: &str) -> Vec<Op> {
         self.step = self.step.saturating_add(1);
         self.ctx.now_ms = NOW.saturating_add(self.step.saturating_mul(1_000));
@@ -292,11 +307,11 @@ impl Harness {
     }
 }
 
-fn timers(count: usize) -> Value {
+fn timers(count: usize, base: i64) -> Value {
     let mut running = Vec::new();
     let mut paused = Vec::new();
     for index in 0..count {
-        let seconds = 3_600_i64.saturating_add(
+        let seconds = base.saturating_add(
             i64::try_from(index).unwrap_or(i64::MAX).saturating_mul(37),
         );
         if index.checked_rem(11) == Some(0) {
@@ -314,9 +329,7 @@ fn timers(count: usize) -> Value {
                 "label": format!("timer {index}"),
                 "message": if index.checked_rem(3) == Some(0) { Some(format!("message {index}")) } else { None },
                 "paused": false,
-                "endsAt": NOW
-                    .saturating_add(seconds.saturating_mul(1_000))
-                    .saturating_add(FUTURE_MS),
+                "endsAt": NOW.saturating_add(seconds.saturating_mul(1_000)),
             }));
         }
     }
@@ -411,6 +424,7 @@ fn run(config: &Config) -> Report {
         50
     };
     let mut harness = Harness::new(&config.case, count);
+    let initial_state = harness.ctx.state.clone();
     if config.case == "service_commit" {
         let _ = harness.dispatch(&config.case);
     }
@@ -428,6 +442,9 @@ fn run(config: &Config) -> Report {
 
     let mut samples = Vec::with_capacity(config.samples);
     for _ in 0..config.samples {
+        if !config.case.starts_with("service") {
+            harness.reset(&initial_state);
+        }
         let started = Instant::now();
         for _ in 0..config.batch {
             let _ = std::hint::black_box(harness.dispatch(&config.case));

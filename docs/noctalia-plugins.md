@@ -1,9 +1,11 @@
 # Noctalia plugin API docs
 
-This plugin targets the Noctalia plugin API (Luau entry scripts plus a
-`plugin.toml` manifest). The authoritative documentation is online at
-docs.noctalia.dev, so read it there instead of guessing at an API from this
-repo. The pages below are the ones worth fetching first.
+The plugin is written in Rust with
+[noctalia-rs](https://github.com/lumi673/noctalia-rs), which generates the Luau
+entry stubs and the `plugin.toml` manifest. The host API is still the Noctalia
+plugin API. The authoritative documentation is online at docs.noctalia.dev, so
+read it there instead of guessing at an API from this repo. The pages below are
+the ones worth fetching first.
 
 - [Plugin development overview](https://docs.noctalia.dev/noctalia/plugins/development/)
 - [Manifest and settings](https://docs.noctalia.dev/noctalia/plugins/development/manifest/)

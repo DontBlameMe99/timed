@@ -1,6 +1,6 @@
 --!nonstrict
 -- Tests for shared timer commands. Run with:
--- luau tests/timers_test.luau -a "$(cat timed/lib/timers.luau)"
+-- luau bench/luau/tests/timers_test.luau -a "$(cat bench/luau/lib/timers.luau)"
 
 local failures = 0
 
@@ -13,7 +13,7 @@ end
 
 local source = ...
 if type(source) ~= "string" then
-  error("pass timed/lib/timers.luau as a program argument")
+  error("pass bench/luau/lib/timers.luau as a program argument")
 end
 
 local timers = {

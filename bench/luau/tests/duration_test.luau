@@ -1,7 +1,8 @@
 --!nonstrict
--- Tests for timed/lib/duration.luau. Run with: luau tests/duration_test.luau
+-- Tests for the Luau reference duration module. Run with:
+-- luau bench/luau/tests/duration_test.luau
 
-local duration = require("../timed/lib/duration")
+local duration = require("../lib/duration")
 
 local failures = 0
 

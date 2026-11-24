@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Bump the plugin version in timed/plugin.toml and catalog.toml."""
+"""Bump the plugin version in Cargo.toml and catalog.toml."""
 
 import re
 import sys
 from pathlib import Path
 
 BUMP = sys.argv[1]
-FILES = (Path("timed/plugin.toml"), Path("catalog.toml"))
+FILES = (Path("Cargo.toml"), Path("catalog.toml"))
 PATTERN = re.compile(r'^version = "(\d+)\.(\d+)\.(\d+)"$', re.MULTILINE)
 
 if BUMP not in ("major", "minor", "patch"):
@@ -14,11 +14,11 @@ if BUMP not in ("major", "minor", "patch"):
 
 matches = {path: PATTERN.search(path.read_text()) for path in FILES}
 if any(match is None for match in matches.values()):
-    raise SystemExit("version line not found in plugin.toml or catalog.toml")
+    raise SystemExit("version line not found in Cargo.toml or catalog.toml")
 
 versions = {(m.group(1), m.group(2), m.group(3)) for m in matches.values() if m}
 if len(versions) != 1:
-    raise SystemExit("plugin.toml and catalog.toml versions differ")
+    raise SystemExit("Cargo.toml and catalog.toml versions differ")
 
 major, minor, patch = (int(part) for part in versions.pop())
 if BUMP == "major":

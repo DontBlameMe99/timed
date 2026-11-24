@@ -6,7 +6,7 @@ resolver = "3"
 name = "timed"
 
 [workspace.package]
-version = "1.3.4"
+version = "1.3.5"
 edition = "2024"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/DontBlameMeDev/timed"

@@ -3,7 +3,7 @@
 [[plugin]]
 id = "dontblameme/timed"
 name = "Timed"
-version = "1.3.4"
+version = "1.3.5"
 author = "DontBlameMe"
 license = "GPL-3.0-or-later"
 dependencies = []

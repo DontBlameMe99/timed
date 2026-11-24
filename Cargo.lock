@@ -458,16 +458,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "timed-bench"
-version = "1.3.5"
-dependencies = [
- "noctalia-rs",
- "serde",
- "serde_json",
- "timed",
-]
-
-[[package]]
 name = "toml"
 version = "0.8.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"

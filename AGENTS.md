@@ -21,17 +21,15 @@ python3 .github/scripts/check-catalog.py
 cargo deny check
 cargo run --release -- emit "$TMP/plugin" timed-helper
 diff -r --exclude=timed-helper "$TMP/plugin" timed
-luau bench/luau/tests/duration_test.luau
 ```
 
 `nix flake check` runs the build, clippy, test, and format checks in one go.
 
 The lint, format, and dependency rules are copied from
 `~/projects/project_templates/rust`. `src/` and `tests/` follow the strict
-workspace lints, including checked arithmetic and no panics outside tests. The
-`bench/` crate is a dev harness and declares an empty `[lints]` table instead,
-so it keeps the default set. Format with stable rustfmt: the nightly-only keys
-in `.rustfmt.toml` are ignored, and CI uses stable.
+workspace lints, including checked arithmetic and no panics outside tests.
+Format with stable rustfmt: the nightly-only keys in `.rustfmt.toml` are
+ignored, and CI uses stable.
 
 The plugin is GPL-3.0-or-later because the helper links noctalia-rs. Keep
 `catalog.toml` and the workspace license in sync.
@@ -45,9 +43,6 @@ cargo run --release -- emit timed timed-helper
 
 The committed `timed/timed-helper` is a static x86_64 build. The release
 workflow rebuilds it. Do not edit anything under `timed/` by hand.
-
-The Luau LSP step needs the definitions file that CI downloads. See
-`.github/workflows/ci.yml`. `luau` and `luau-lsp` are not installed here.
 
 ## Release
 
@@ -80,19 +75,6 @@ CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=rust-lld \
 cp target/x86_64-unknown-linux-musl/release/timed timed/timed-helper
 python3 .github/scripts/check-catalog.py
 ```
-
-## Benchmark
-
-`bench/` holds the original Luau implementation, unmodified, and a paired
-benchmark. Both sides run the same fixture and must emit the same ops before
-timing is reported.
-
-```sh
-cargo run --release -p timed-bench -- --samples 200 --warmup 20 --batch 10 \
-  --helper timed/timed-helper
-```
-
-It needs `luau` on `PATH` (or `--luau <path>`).
 
 ## API
 

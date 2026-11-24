@@ -15,16 +15,31 @@ use noctalia_rs::{Context, Op, Result};
 use serde_json::{Value, json};
 
 use crate::duration;
+use crate::i18n::tr;
 use crate::sync::lock;
 use crate::timer::{self, Clock, Timer};
 
-struct Launcher {
-    suppressed: bool,
+#[derive(Default)]
+struct RowCache {
+    query: String,
+    state: Value,
+    timers: Vec<Timer>,
+    tokens: Vec<(u64, bool)>,
+    time: String,
+    date: String,
+    rows: Vec<Value>,
 }
 
+struct Launcher {
+    suppressed: bool,
+    cache: Option<RowCache>,
+}
 impl Launcher {
     const fn new() -> Self {
-        Self { suppressed: false }
+        Self {
+            suppressed: false,
+            cache: None,
+        }
     }
 }
 
@@ -45,7 +60,7 @@ pub fn update(ctx: &Context) -> Result<Vec<Op>> {
             if source == "state" && suppressed {
                 return Ok(Vec::new());
             }
-            let rows = rows(ctx, &text);
+            let rows = rows(ctx, &text, &mut launcher.cache);
             Ok(vec![Op::LauncherResults { text, rows }])
         }
         "activate" => {
@@ -67,22 +82,26 @@ struct Action<'a> {
 
 fn title(ctx: &Context, timer: &Timer) -> String {
     timer.message.clone().unwrap_or_else(|| {
-        ctx.tr("launcher.timer", &[("duration", timer.label.clone())])
+        tr(ctx, "launcher.timer", &[("duration", timer.label.clone())])
     })
 }
 
 fn count_text(ctx: &Context, count: usize) -> String {
     if count == 1 {
-        return ctx.tr("launcher.one_timer", &[]);
+        return tr(ctx, "launcher.one_timer", &[]);
     }
-    ctx.tr("launcher.active_count", &[("count", count.to_string())])
+    tr(
+        ctx,
+        "launcher.active_count",
+        &[("count", count.to_string())],
+    )
 }
 
 fn empty_row(ctx: &Context) -> Value {
     json!({
         "id": "empty",
-        "title": ctx.tr("launcher.no_matching", &[]),
-        "subtitle": ctx.tr("launcher.hint", &[]),
+        "title": tr(ctx, "launcher.no_matching", &[]),
+        "subtitle": tr(ctx, "launcher.hint", &[]),
         "glyph": "clock",
     })
 }
@@ -90,8 +109,8 @@ fn empty_row(ctx: &Context) -> Value {
 fn start_hint_row(ctx: &Context) -> Value {
     json!({
         "id": "new",
-        "title": ctx.tr("launcher.start_new", &[]),
-        "subtitle": ctx.tr("launcher.hint", &[]),
+        "title": tr(ctx, "launcher.start_new", &[]),
+        "subtitle": tr(ctx, "launcher.hint", &[]),
         "glyph": "plus",
         "query": " ",
     })
@@ -101,8 +120,8 @@ fn start_row(ctx: &Context, query: &str) -> Value {
     let Some((seconds, message)) = duration::split(query) else {
         return json!({
             "id": "invalid",
-            "title": ctx.tr("launcher.invalid", &[]),
-            "subtitle": ctx.tr("launcher.hint", &[]),
+            "title": tr(ctx, "launcher.invalid", &[]),
+            "subtitle": tr(ctx, "launcher.hint", &[]),
             "glyph": "alert-triangle",
         });
     };
@@ -110,7 +129,8 @@ fn start_row(ctx: &Context, query: &str) -> Value {
     let subtitle = message.as_ref().map_or_else(
         || label.clone(),
         |text| {
-            ctx.tr(
+            tr(
+                ctx,
                 "launcher.message",
                 &[("duration", label.clone()), ("message", text.clone())],
             )
@@ -118,7 +138,7 @@ fn start_row(ctx: &Context, query: &str) -> Value {
     );
     json!({
         "id": format!("start:{seconds}:{}", message.unwrap_or_default()),
-        "title": ctx.tr("launcher.start", &[("time", label)]),
+        "title": tr(ctx, "launcher.start", &[("time", label)]),
         "subtitle": subtitle,
         "glyph": "clock",
     })
@@ -128,12 +148,14 @@ fn action_row(ctx: &Context, action: &Action<'_>, clock: &Clock) -> Value {
     let timer = action.timer;
     let remaining = timer.remaining_seconds(clock.now);
     let subtitle = if timer.paused {
-        ctx.tr(
+        tr(
+            ctx,
             "launcher.paused_at",
             &[("duration", duration::approx(remaining))],
         )
     } else {
-        ctx.tr(
+        tr(
+            ctx,
             "launcher.ends_at",
             &[
                 ("time", timer.ends_at_text(ctx, clock)),
@@ -149,15 +171,47 @@ fn action_row(ctx: &Context, action: &Action<'_>, clock: &Clock) -> Value {
     };
     json!({
         "id": format!("{}:{}", action.name, timer.id),
-        "title": format!("{} {}", ctx.tr(&format!("launcher.{}", action.name), &[]), title(ctx, timer)),
+        "title": format!("{} {}", tr(ctx, &format!("launcher.{}", action.name), &[]), title(ctx, timer)),
         "subtitle": subtitle,
         "glyph": glyph,
     })
 }
 
-fn rows_for(ctx: &Context, name: &str, paused: Option<bool>) -> Vec<Value> {
+fn tokens(timers: &[Timer], now: i64) -> Vec<(u64, bool)> {
+    timers
+        .iter()
+        .map(|timer| {
+            let seconds = timer.remaining_seconds(now);
+            (duration::approx_token(seconds), seconds >= duration::DAY)
+        })
+        .collect()
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the context, query, filter, and row cache"
+)]
+fn rows_for(
+    ctx: &Context,
+    name: &str,
+    paused: Option<bool>,
+    cache: &mut Option<RowCache>,
+) -> Vec<Value> {
     let clock = Clock::read(ctx);
-    let rows: Vec<Value> = timer::list(ctx)
+    if let Some(hit) = cache.as_ref()
+        && hit.query == name
+        && hit.state == ctx.state
+        && hit.time == clock.time
+        && hit.date == clock.date
+        && hit.tokens == tokens(&hit.timers, clock.now)
+    {
+        return hit.rows.clone();
+    }
+
+    let timers = timer::list(ctx);
+    let tokens = tokens(&timers, clock.now);
+
+    let rows: Vec<Value> = timers
         .iter()
         .filter(|timer| paused.is_none_or(|want| timer.paused == want))
         .map(|timer| action_row(ctx, &Action { name, timer }, &clock))
@@ -165,16 +219,25 @@ fn rows_for(ctx: &Context, name: &str, paused: Option<bool>) -> Vec<Value> {
     if rows.is_empty() {
         return vec![empty_row(ctx)];
     }
+    *cache = Some(RowCache {
+        query: name.to_owned(),
+        state: ctx.state.clone(),
+        timers,
+        tokens,
+        time: clock.time,
+        date: clock.date,
+        rows: rows.clone(),
+    });
     rows
 }
 
-fn rows(ctx: &Context, text: &str) -> Vec<Value> {
+fn rows(ctx: &Context, text: &str, cache: &mut Option<RowCache>) -> Vec<Value> {
     let query = text.trim_ascii();
     match query {
         "" => vec![start_hint_row(ctx)],
-        "pause" => rows_for(ctx, "pause", Some(false)),
-        "resume" => rows_for(ctx, "resume", Some(true)),
-        "stop" => rows_for(ctx, "stop", None),
+        "pause" => rows_for(ctx, "pause", Some(false), cache),
+        "resume" => rows_for(ctx, "resume", Some(true), cache),
+        "stop" => rows_for(ctx, "stop", None, cache),
         "stop all" => {
             let total = timer::list(ctx).len();
             if total == 0 {
@@ -182,7 +245,7 @@ fn rows(ctx: &Context, text: &str) -> Vec<Value> {
             } else {
                 vec![json!({
                     "id": "stop-all",
-                    "title": ctx.tr("launcher.stop_all", &[]),
+                    "title": tr(ctx, "launcher.stop_all", &[]),
                     "subtitle": count_text(ctx, total),
                     "glyph": "player-stop",
                 })]
@@ -246,13 +309,71 @@ mod tests {
 
     #[test]
     fn rows_cover_every_query() {
+        let mut launcher = Launcher::new();
         let ctx =
             test_context::context("query", json!({}), json!({}), json!({}));
-        assert_eq!(rows(&ctx, "")[0]["id"], json!("new"));
-        assert_eq!(rows(&ctx, "pause")[0]["id"], json!("empty"));
-        assert_eq!(rows(&ctx, "resume")[0]["id"], json!("empty"));
-        assert_eq!(rows(&ctx, "stop")[0]["id"], json!("empty"));
-        assert_eq!(rows(&ctx, "stop all")[0]["id"], json!("empty"));
-        assert_eq!(rows(&ctx, "5")[0]["id"], json!("start:300:"));
+        assert_eq!(rows(&ctx, "", &mut launcher.cache)[0]["id"], json!("new"));
+        assert_eq!(
+            rows(&ctx, "pause", &mut launcher.cache)[0]["id"],
+            json!("empty")
+        );
+        assert_eq!(
+            rows(&ctx, "resume", &mut launcher.cache)[0]["id"],
+            json!("empty")
+        );
+        assert_eq!(
+            rows(&ctx, "stop", &mut launcher.cache)[0]["id"],
+            json!("empty")
+        );
+        assert_eq!(
+            rows(&ctx, "stop all", &mut launcher.cache)[0]["id"],
+            json!("empty")
+        );
+        assert_eq!(
+            rows(&ctx, "5", &mut launcher.cache)[0]["id"],
+            json!("start:300:")
+        );
+    }
+    #[test]
+    fn cache_tracks_the_values_the_rows_show() {
+        let now: i64 = 1_800_000_000_000;
+        let timers = |label: &str| {
+            json!({ "timers": [{
+                "id": "one",
+                "seconds": 600,
+                "label": label,
+                "paused": false,
+                "endsAt": now + 600_000,
+            }] })
+        };
+        let host = json!({
+            "now_ms": now,
+            "setting": {
+                "shell.time_format": "%H:%M",
+                "shell.date_format": "%Y-%m-%d",
+            },
+        });
+        let mut ctx =
+            test_context::context("query", json!({}), timers("10m"), host);
+        let mut launcher = Launcher::new();
+
+        let first = rows(&ctx, "pause", &mut launcher.cache);
+        ctx.now_ms = now.saturating_add(1_000);
+        assert_eq!(rows(&ctx, "pause", &mut launcher.cache), first);
+
+        ctx.now_ms = now.saturating_add(31_000);
+        let later = rows(&ctx, "pause", &mut launcher.cache);
+        assert_ne!(later, first);
+        assert!(serde_json::to_string(&later).expect("row").contains("9m"));
+
+        ctx.now_ms = now;
+        ctx.state = timers("changed");
+        let changed = rows(&ctx, "pause", &mut launcher.cache);
+        assert_ne!(changed, first);
+        assert!(
+            serde_json::to_string(&changed)
+                .expect("row")
+                .contains("changed")
+        );
     }
 }

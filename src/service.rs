@@ -21,6 +21,7 @@ use serde_json::Value;
 
 use crate::duration;
 use crate::file;
+use crate::i18n::tr;
 use crate::math::quotient;
 use crate::sync::lock;
 use crate::timer::{
@@ -225,9 +226,9 @@ fn expire(ctx: &Context, service: &mut Service, ops: &mut Vec<Op>) -> bool {
 
 fn notify_finished(ctx: &Context, timer: &Timer, ops: &mut Vec<Op>) {
     ops.push(Op::Notify {
-        title: ctx.tr("notify.title", &[]),
+        title: tr(ctx, "notify.title", &[]),
         body: timer.message.clone().unwrap_or_else(|| {
-            ctx.tr("notify.body", &[("duration", timer.label.clone())])
+            tr(ctx, "notify.body", &[("duration", timer.label.clone())])
         }),
         options: None,
     });

@@ -105,15 +105,25 @@ pub fn split(text: &str) -> Option<(i64, Option<String>)> {
     if input.is_empty() {
         return None;
     }
-    if let Some(seconds) = parse(input) {
+    let end = input
+        .bytes()
+        .position(|byte: u8| byte.is_ascii_whitespace())
+        .unwrap_or(input.len());
+    if end == input.len() {
+        return parse(input).map(|seconds| (seconds, None));
+    }
+    let rest = input[end..].trim();
+    let continues = rest.as_bytes().first().is_some_and(|byte| {
+        byte.is_ascii_digit()
+            || matches!(
+                byte.to_ascii_lowercase(),
+                b'y' | b'd' | b'h' | b'm' | b's'
+            )
+    });
+    if continues && let Some(seconds) = parse(input) {
         return Some((seconds, None));
     }
-
-    let end = input
-        .find(|character: char| character.is_ascii_whitespace())
-        .unwrap_or(input.len());
     let seconds = parse(&input[..end])?;
-    let rest = input[end..].trim();
     let message = (!rest.is_empty()).then(|| rest.to_owned());
     Some((seconds, message))
 }
@@ -322,5 +332,43 @@ mod tests {
         assert_ne!(token(3_000), token(3_600));
         assert_eq!(token(86_399), token(86_400));
         assert_ne!(token(90_000), token(400 * DAY));
+    }
+    fn reference_split(text: &str) -> Option<(i64, Option<String>)> {
+        let input = text.trim();
+        if input.is_empty() {
+            return None;
+        }
+        if let Some(seconds) = parse(input) {
+            return Some((seconds, None));
+        }
+        let end = input
+            .find(|character: char| character.is_ascii_whitespace())
+            .unwrap_or(input.len());
+        let seconds = parse(&input[..end])?;
+        let rest = input[end..].trim();
+        let message = (!rest.is_empty()).then(|| rest.to_owned());
+        Some((seconds, message))
+    }
+
+    #[test]
+    #[expect(
+        clippy::excessive_nesting,
+        reason = "the test enumerates short combinations of duration tokens"
+    )]
+    fn split_matches_the_whole_text_first_rule() {
+        let pieces = ["1", "5", "h", "m", "s", "x", " ", "  "];
+        let mut cases = Vec::new();
+        for first in pieces {
+            for second in pieces {
+                for third in pieces {
+                    for fourth in pieces {
+                        cases.push(format!("{first}{second}{third}{fourth}"));
+                    }
+                }
+            }
+        }
+        for text in cases {
+            assert_eq!(split(&text), reference_split(&text), "{text}");
+        }
     }
 }

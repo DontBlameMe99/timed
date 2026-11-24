@@ -34,6 +34,7 @@ use noctalia_rs::{Context, Op, Parts};
 use serde_json::{Value, json};
 
 const NOW: i64 = 1_800_000_000_000;
+const FUTURE_MS: i64 = 1_000_000_000;
 const COLORS: &[(&str, &str)] = &[
     ("primary", "#CBA6F7"),
     ("secondary", "#F9E2AF"),
@@ -106,6 +107,14 @@ impl Harness {
             .join(format!("perf-{case}-{}", process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).expect("benchmark scratch directory");
+        if case.starts_with("service") {
+            fs::write(
+                dir.join("timers.json"),
+                serde_json::to_string(&json!({ "timers": timers(count) }))
+                    .expect("seed"),
+            )
+            .expect("seed timers");
+        }
         let timers = timers(count);
         let state = json!({ "timers": timers });
         let host = host(NOW);
@@ -249,12 +258,16 @@ impl Harness {
             }
             "service_commit" => {
                 "host_callback".clone_into(&mut self.ctx.event);
+                let action = if self.step.checked_rem(2) == Some(1) {
+                    "pause"
+                } else {
+                    "resume"
+                };
                 self.ctx.payload = json!({
                     "id": "command",
                     "args": [{
-                        "action": "start",
-                        "seconds": 3_600_i64.saturating_add(self.step),
-                        "id": format!("bench-{}", self.step),
+                        "action": action,
+                        "id": "t1",
                         "n": self.step,
                     }],
                 });
@@ -280,33 +293,35 @@ impl Harness {
 }
 
 fn timers(count: usize) -> Value {
-    let values = (0..count)
-        .map(|index| {
-            let seconds = 3_600_i64.saturating_add(
-                i64::try_from(index).unwrap_or(i64::MAX).saturating_mul(37),
-            );
-            let paused = index.checked_rem(11) == Some(0);
-            if paused {
-                json!({
-                    "id": format!("t{index}"),
-                    "seconds": seconds,
-                    "label": format!("timer {index}"),
-                    "paused": true,
-                    "remainingMs": seconds.saturating_mul(1_000),
-                })
-            } else {
-                json!({
-                    "id": format!("t{index}"),
-                    "seconds": seconds,
-                    "label": format!("timer {index}"),
-                    "message": if index.checked_rem(3) == Some(0) { Some(format!("message {index}")) } else { None },
-                    "paused": false,
-                    "endsAt": NOW.saturating_add(seconds.saturating_mul(1_000)),
-                })
-            }
-        })
-        .collect::<Vec<_>>();
-    Value::Array(values)
+    let mut running = Vec::new();
+    let mut paused = Vec::new();
+    for index in 0..count {
+        let seconds = 3_600_i64.saturating_add(
+            i64::try_from(index).unwrap_or(i64::MAX).saturating_mul(37),
+        );
+        if index.checked_rem(11) == Some(0) {
+            paused.push(json!({
+                "id": format!("t{index}"),
+                "seconds": seconds,
+                "label": format!("timer {index}"),
+                "paused": true,
+                "remainingMs": seconds.saturating_mul(1_000),
+            }));
+        } else {
+            running.push(json!({
+                "id": format!("t{index}"),
+                "seconds": seconds,
+                "label": format!("timer {index}"),
+                "message": if index.checked_rem(3) == Some(0) { Some(format!("message {index}")) } else { None },
+                "paused": false,
+                "endsAt": NOW
+                    .saturating_add(seconds.saturating_mul(1_000))
+                    .saturating_add(FUTURE_MS),
+            }));
+        }
+    }
+    running.extend(paused);
+    Value::Array(running)
 }
 
 fn widget_config() -> Value {
@@ -397,12 +412,6 @@ fn run(config: &Config) -> Report {
     };
     let mut harness = Harness::new(&config.case, count);
     if config.case == "service_commit" {
-        fs::write(
-            harness.dir.join("timers.json"),
-            serde_json::to_string(&json!({ "timers": timers(count) }))
-                .expect("seed"),
-        )
-        .expect("seed timers");
         let _ = harness.dispatch(&config.case);
     }
     for _ in 0..config.warmup {
@@ -477,6 +486,7 @@ fn parse() -> Config {
             "--trace-steps" => config.trace_steps = number(&mut args),
             "--snapshot" => config.snapshot = args.next().map(PathBuf::from),
             "--record" => config.record = args.next().map(PathBuf::from),
+            "--bench" => {}
             _ => process::exit(2),
         }
     }

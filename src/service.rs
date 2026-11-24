@@ -97,7 +97,6 @@ fn start(ctx: &Context, service: &mut Service, ops: &mut Vec<Op>) {
         .global_state(LAST_COMMAND_KEY)
         .and_then(|value| value.as_i64())
         .unwrap_or(0);
-    seed_sequence(service.last_command);
     load(ctx, service, ops);
     sort(&mut service.timers);
     ops.push(Op::state_watch(COMMAND_KEY, "command"));
@@ -105,6 +104,7 @@ fn start(ctx: &Context, service: &mut Service, ops: &mut Vec<Op>) {
     if let Some(command) = ctx.global_state(COMMAND_KEY) {
         handle_command(ctx, service, &command, ops);
     }
+    seed_sequence(service.last_command);
     expire(ctx, service, ops);
     commit(ctx, service, ops);
 }

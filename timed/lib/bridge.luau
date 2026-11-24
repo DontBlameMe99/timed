@@ -23,43 +23,26 @@ local ROOTS = {
 
 local COLOR_ROLES = {
   "primary",
-  "on_primary",
-  "primary_container",
-  "on_primary_container",
   "secondary",
-  "on_secondary",
-  "secondary_container",
-  "on_secondary_container",
   "tertiary",
-  "on_tertiary",
-  "tertiary_container",
-  "on_tertiary_container",
   "error",
-  "on_error",
-  "error_container",
-  "on_error_container",
-  "surface",
   "on_surface",
   "on_surface_variant",
-  "surface_container_low",
-  "surface_container",
-  "surface_container_high",
-  "surface_container_highest",
   "outline_variant",
-  "shadow",
-  "scrim",
-  "hover",
-  "on_hover",
 }
 
 local SETTING_PATHS = {
   "shell.time_format",
+  "shell.font_family",
   "shell.date_format",
 }
 
 M.entry = "unknown"
 M.config = {}
 M.state = {}
+local CONFIG_JSON = "{}"
+local STATE_JSON = "{}"
+local STATE_VERSION = 0
 M.host = {}
 local function safeName(value)
   return (tostring(value):gsub("[^%w_%.%-]", "_"))
@@ -172,17 +155,7 @@ end
 local function snapshot()
   local host = {
     now_ms = invoke(noctalia, "nowMs") or 0,
-    dark = invoke(noctalia, "isDarkMode"),
-    outputs = invoke(noctalia, "outputs"),
-    focused_output_name = invoke(noctalia, "focusedOutputName"),
-    pluginDir = invoke(noctalia, "pluginDir"),
-    pluginDataDir = invoke(noctalia, "pluginDataDir"),
-    clipboard = invoke(noctalia, "clipboardText"),
-    calendar = invoke(noctalia, "calendarEvents"),
-    media = invoke(noctalia, "mediaPlayer"),
-    stats = invoke(noctalia, "systemStats"),
-    nightlight = invoke(noctalia, "nightlight.state"),
-    compositor = { name = invoke(noctalia, "compositor.name") },
+    timed_state_version = STATE_VERSION,
     setting = {},
     bar = {
       vertical = invoke(barWidget, "isVertical"),
@@ -277,7 +250,7 @@ local handlers = {
       response.value = nil
       response.error = tostring(value)
     end
-    local encoded = noctalia.json.encode(encodeBytes(response))
+    local encoded = noctalia.json.encode(response)
     if encoded then
       local temporary = op.response .. ".pending"
       local written, write_err = noctalia.writeFile(temporary, encoded)
@@ -303,7 +276,27 @@ local function writeRequest(request)
   local target = REQUEST_DIR .. "/" .. name .. ".json"
   M.host = snapshot()
   request.host = M.host
-  local ok, err = noctalia.writeFile(temporary, noctalia.json.encode(encodeBytes(request)))
+  local field_count = 0
+  for _ in pairs(request) do field_count += 1 end
+  local head = noctalia.json.encode({
+    boot = request.boot,
+    entry = request.entry,
+    event = request.event,
+    payload = request.payload or {},
+  }) or "{}"
+  local host = noctalia.json.encode(M.host) or "{}"
+  local text
+  if field_count == 7
+    and head:sub(1, 1) == "{" and head:sub(-1) == "}"
+    and host:sub(1, 1) == "{" and host:sub(-1) == "}" then
+    text = string.sub(head, 1, -2)
+      .. ',"config":' .. CONFIG_JSON
+      .. ',"state":' .. STATE_JSON
+      .. ',"host":' .. host .. "}"
+  else
+    text = noctalia.json.encode(encodeBytes(request))
+  end
+  local ok, err = noctalia.writeFile(temporary, text)
   if ok then
     ok, err = noctalia.renameFile(temporary, target)
   end
@@ -395,13 +388,17 @@ function M.setup(entry, configKeys)
     M.config[key] = noctalia.getConfig(key)
   end
   M.state = noctalia.state.get(STATE_KEY) or {}
-  M.host = snapshot()
+  STATE_VERSION += 1
+  CONFIG_JSON = noctalia.json.encode(M.config) or "{}"
+  STATE_JSON = noctalia.json.encode(M.state) or "{}"
   startStream()
 end
 
 function M.watch_state(rerender)
   noctalia.state.watch(STATE_KEY, function(value)
     M.state = value or {}
+    STATE_VERSION += 1
+    STATE_JSON = noctalia.json.encode(M.state) or "{}"
     rerender()
   end)
 end

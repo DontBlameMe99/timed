@@ -25,7 +25,8 @@ use crate::i18n::tr;
 use crate::math::quotient;
 use crate::sync::lock;
 use crate::timer::{
-    COMMAND_KEY, FILE_NAME, LAST_COMMAND_KEY, List, STATE_KEY, Timer, sort,
+    COMMAND_KEY, FILE_NAME, LAST_COMMAND_KEY, STATE_KEY, Timer, seed_sequence,
+    sort,
 };
 
 const MAX_INTERVAL_MS: i64 = 86_400_000;
@@ -79,9 +80,9 @@ pub fn update(ctx: &Context) -> Result<Vec<Op>> {
         "ipc" => ipc(ctx, &mut service, &mut ops),
         "host_callback" => {
             if ctx.payload_str("id").as_deref() == Some("command")
-                && let Some(command) = ctx.payload_arg(0).cloned()
+                && let Some(command) = ctx.payload_arg(0)
             {
-                handle_command(ctx, &mut service, &command, &mut ops);
+                handle_command(ctx, &mut service, command, &mut ops);
             }
         }
         _ => {}
@@ -103,6 +104,7 @@ fn start(ctx: &Context, service: &mut Service, ops: &mut Vec<Op>) {
     if let Some(command) = ctx.global_state(COMMAND_KEY) {
         handle_command(ctx, service, &command, ops);
     }
+    seed_sequence(service.last_command);
     expire(ctx, service, ops);
     commit(ctx, service, ops);
 }
@@ -159,8 +161,12 @@ fn normalize(saved: &Value) -> Option<Timer> {
 }
 
 fn publish(ctx: &Context, service: &mut Service, ops: &mut Vec<Op>) {
-    let list = List {
-        timers: service.timers.clone(),
+    #[derive(serde::Serialize)]
+    struct Saved<'a> {
+        timers: &'a [Timer],
+    }
+    let list = Saved {
+        timers: &service.timers,
     };
     ops.push(Op::state(
         STATE_KEY,

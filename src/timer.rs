@@ -82,13 +82,18 @@ impl Timer {
     /// from this, so a redraw happens only when the drawn value moves.
     #[must_use]
     pub fn fraction_step(&self, now: i64, steps: u16) -> u16 {
+        self.fraction_step_ms(self.remaining_ms(now), steps)
+    }
+
+    #[must_use]
+    pub(crate) fn fraction_step_ms(&self, remaining: i64, steps: u16) -> u16 {
         let total = self.seconds.saturating_mul(1_000);
         if total <= 0 {
             return steps;
         }
-        let remaining = self.remaining_ms(now).clamp(0, total);
+        let clamped = remaining.clamp(0, total);
         let total_steps = i64::from(steps);
-        let scaled = remaining
+        let scaled = clamped
             .saturating_mul(total_steps)
             .saturating_mul(2)
             .saturating_add(total);
@@ -100,10 +105,15 @@ impl Timer {
     /// Whether `fraction` of the timer is at or below `share`, in percent.
     #[must_use]
     pub fn within(&self, now: i64, share: i64) -> bool {
+        self.within_ms(self.remaining_ms(now), share)
+    }
+
+    #[must_use]
+    pub(crate) const fn within_ms(&self, remaining: i64, share: i64) -> bool {
         if self.seconds <= 0 {
             return true;
         }
-        self.remaining_ms(now).saturating_mul(100)
+        remaining.saturating_mul(100)
             <= self.seconds.saturating_mul(1_000).saturating_mul(share)
     }
 }
@@ -117,6 +127,11 @@ pub struct List {
 #[must_use]
 pub fn list(ctx: &Context) -> Vec<Timer> {
     ctx.state_value::<Vec<Timer>>("timers").unwrap_or_default()
+}
+
+#[must_use]
+pub fn state_revision(ctx: &Context) -> Option<i64> {
+    ctx.host.get("timed_state_version").and_then(Value::as_i64)
 }
 
 type TimeCache = Vec<(String, i64, String)>;
@@ -164,8 +179,16 @@ impl Clock {
     pub fn read(ctx: &Context) -> Self {
         Self {
             now: ctx.now_ms,
-            time: ctx.time_format().unwrap_or_default(),
-            date: ctx.date_format().unwrap_or_default(),
+            time: ctx
+                .setting("shell.time_format")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            date: ctx
+                .setting("shell.date_format")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
         }
     }
 }
@@ -185,6 +208,10 @@ pub fn sort(timers: &mut [Timer]) {
 }
 
 static SEQUENCE: Mutex<Option<i64>> = Mutex::new(None);
+
+pub(crate) fn seed_sequence(value: i64) {
+    *lock(&SEQUENCE) = Some(value);
+}
 
 fn next_sequence(ctx: &Context) -> i64 {
     let mut sequence = lock(&SEQUENCE);

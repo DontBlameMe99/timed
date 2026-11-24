@@ -9,6 +9,7 @@
 //!   /timer stop     list timers to stop
 //!   /timer stop all stop every timer
 
+use std::mem;
 use std::sync::Mutex;
 
 use noctalia_rs::{Context, Op, Result};
@@ -22,9 +23,11 @@ use crate::timer::{self, Clock, Timer};
 #[derive(Default)]
 struct RowCache {
     query: String,
-    state: Value,
+    revision: Option<i64>,
+    state: Option<Value>,
     timers: Vec<Timer>,
     tokens: Vec<(u64, bool)>,
+    scratch: Vec<(u64, bool)>,
     time: String,
     date: String,
     rows: Vec<Value>,
@@ -34,6 +37,7 @@ struct Launcher {
     suppressed: bool,
     cache: Option<RowCache>,
 }
+
 impl Launcher {
     const fn new() -> Self {
         Self {
@@ -177,19 +181,19 @@ fn action_row(ctx: &Context, action: &Action<'_>, clock: &Clock) -> Value {
     })
 }
 
-fn tokens(timers: &[Timer], now: i64) -> Vec<(u64, bool)> {
-    timers
-        .iter()
-        .map(|timer| {
-            let seconds = timer.remaining_seconds(now);
-            (duration::approx_token(seconds), seconds >= duration::DAY)
-        })
-        .collect()
+fn tokens_into(timers: &[Timer], now: i64, tokens: &mut Vec<(u64, bool)>) {
+    tokens.clear();
+    for timer in timers {
+        let remaining = timer.remaining_ms(now);
+        let long =
+            remaining > duration::DAY.saturating_sub(1).saturating_mul(1_000);
+        tokens.push((duration::approx_token_ms(remaining), long));
+    }
 }
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "the context, query, filter, and row cache"
+    reason = "the context, action, filter, and row cache"
 )]
 fn rows_for(
     ctx: &Context,
@@ -198,19 +202,27 @@ fn rows_for(
     cache: &mut Option<RowCache>,
 ) -> Vec<Value> {
     let clock = Clock::read(ctx);
-    if let Some(hit) = cache.as_ref()
+    let revision = timer::state_revision(ctx);
+    let state = ctx.state.get("timers");
+    if let Some(hit) = cache.as_mut()
         && hit.query == name
-        && hit.state == ctx.state
+        && match (hit.revision, revision) {
+            (Some(previous), Some(current)) => previous == current,
+            _ => hit.state.as_ref() == state,
+        }
         && hit.time == clock.time
         && hit.date == clock.date
-        && hit.tokens == tokens(&hit.timers, clock.now)
     {
-        return hit.rows.clone();
+        tokens_into(&hit.timers, clock.now, &mut hit.scratch);
+        if hit.scratch == hit.tokens {
+            return hit.rows.clone();
+        }
+        mem::swap(&mut hit.tokens, &mut hit.scratch);
     }
 
     let timers = timer::list(ctx);
-    let tokens = tokens(&timers, clock.now);
-
+    let mut tokens = Vec::with_capacity(timers.len());
+    tokens_into(&timers, clock.now, &mut tokens);
     let rows: Vec<Value> = timers
         .iter()
         .filter(|timer| paused.is_none_or(|want| timer.paused == want))
@@ -221,9 +233,11 @@ fn rows_for(
     }
     *cache = Some(RowCache {
         query: name.to_owned(),
-        state: ctx.state.clone(),
+        revision,
+        state: state.cloned(),
         timers,
         tokens,
+        scratch: Vec::new(),
         time: clock.time,
         date: clock.date,
         rows: rows.clone(),

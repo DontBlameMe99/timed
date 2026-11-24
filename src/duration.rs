@@ -8,15 +8,18 @@ use std::fmt::Write;
 
 use crate::math::{quotient, remainder};
 
-const YEAR: i64 = 31_536_000;
+const MINUTE: i64 = 60;
+const HOUR: i64 = 60 * MINUTE;
+pub const DAY: i64 = 24 * HOUR;
+const YEAR: i64 = 365 * DAY;
 const MAX_SECONDS: i64 = 100 * YEAR;
 
 const fn unit_seconds(unit: char) -> Option<i64> {
     match unit {
         'y' => Some(YEAR),
-        'd' => Some(86_400),
-        'h' => Some(3_600),
-        'm' => Some(60),
+        'd' => Some(DAY),
+        'h' => Some(HOUR),
+        'm' => Some(MINUTE),
         's' => Some(1),
         _ => None,
     }
@@ -118,10 +121,10 @@ pub fn split(text: &str) -> Option<(i64, Option<String>)> {
 #[must_use]
 pub fn clock(seconds: i64) -> String {
     let total = seconds.max(0);
-    let days = quotient(total, 86_400);
-    let hours = quotient(remainder(total, 86_400), 3_600);
-    let minutes = quotient(remainder(total, 3_600), 60);
-    let secs = remainder(total, 60);
+    let days = quotient(total, DAY);
+    let hours = quotient(remainder(total, DAY), HOUR);
+    let minutes = quotient(remainder(total, HOUR), MINUTE);
+    let secs = remainder(total, MINUTE);
     let mut out = String::with_capacity(16);
     if days > 0 {
         let _ = write!(out, "{days}d {hours}:{minutes:02}:{secs:02}");
@@ -137,10 +140,10 @@ pub fn clock(seconds: i64) -> String {
 pub fn human(seconds: i64) -> String {
     let total = seconds.max(0);
     let years = quotient(total, YEAR);
-    let days = quotient(remainder(total, YEAR), 86_400);
-    let hours = quotient(remainder(total, 86_400), 3_600);
-    let minutes = quotient(remainder(total, 3_600), 60);
-    let secs = remainder(total, 60);
+    let days = quotient(remainder(total, YEAR), DAY);
+    let hours = quotient(remainder(total, DAY), HOUR);
+    let minutes = quotient(remainder(total, HOUR), MINUTE);
+    let secs = remainder(total, MINUTE);
 
     let mut out = String::with_capacity(24);
     for (value, unit) in [
@@ -165,32 +168,58 @@ fn push_part(out: &mut String, value: i64, unit: char) {
     let _ = write!(out, "{value}{unit}");
 }
 
+/// The single unit the bar shows, rounded to that unit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Coarse {
+    Minutes(i64),
+    Hours(i64),
+    Days(i64),
+    Years(i64),
+}
+
+impl Coarse {
+    fn of(seconds: i64) -> Self {
+        let total = seconds.max(0);
+        if total >= DAY {
+            return Self::days(total);
+        }
+        if total >= HOUR {
+            return Self::hours(total);
+        }
+        let minutes = rounded(total, MINUTE).max(1);
+        if minutes >= 60 {
+            return Self::Hours(1);
+        }
+        Self::Minutes(minutes)
+    }
+
+    /// Days, or years once the rounded count reaches one.
+    fn days(total: i64) -> Self {
+        let days = rounded(total, DAY);
+        if days >= 365 {
+            return Self::Years(rounded(days, 365));
+        }
+        Self::Days(days)
+    }
+
+    /// Hours, or a single day once the rounded count reaches one.
+    fn hours(total: i64) -> Self {
+        let hours = rounded(total, HOUR);
+        if hours >= 24 {
+            return Self::Days(1);
+        }
+        Self::Hours(hours)
+    }
+}
+
 /// Coarse form for the bar: the nearest whole unit, such as 4h, 30m, or 1m.
 #[must_use]
 pub fn approx(seconds: i64) -> String {
-    let total = seconds.max(0);
-    if total < 60 {
-        return "1m".to_owned();
-    }
-    if total >= 86_400 {
-        let days = rounded(total, 86_400);
-        if days >= 365 {
-            return format!("{}y", rounded(days, 365));
-        }
-        return format!("{days}d");
-    }
-    if total >= 3_600 {
-        let hours = rounded(total, 3_600);
-        if hours >= 24 {
-            return "1d".to_owned();
-        }
-        return format!("{hours}h");
-    }
-    let minutes = rounded(total, 60);
-    if minutes >= 60 {
-        "1h".to_owned()
-    } else {
-        format!("{minutes}m")
+    match Coarse::of(seconds) {
+        Coarse::Minutes(value) => format!("{value}m"),
+        Coarse::Hours(value) => format!("{value}h"),
+        Coarse::Days(value) => format!("{value}d"),
+        Coarse::Years(value) => format!("{value}y"),
     }
 }
 
@@ -202,29 +231,11 @@ fn rounded(value: i64, divisor: i64) -> i64 {
 /// caches use it to tell when the coarse countdown actually moves.
 #[must_use]
 pub fn approx_token(seconds: i64) -> u64 {
-    let total = seconds.max(0);
-    if total < 60 {
-        return 1;
-    }
-    if total >= 86_400 {
-        let days = rounded(total, 86_400);
-        if days >= 365 {
-            return 1_000_000_u64.saturating_add(as_u64(rounded(days, 365)));
-        }
-        return 2_000_000_u64.saturating_add(as_u64(days));
-    }
-    if total >= 3_600 {
-        let hours = rounded(total, 3_600);
-        if hours >= 24 {
-            return 3_000_000;
-        }
-        return 4_000_000_u64.saturating_add(as_u64(hours));
-    }
-    let minutes = rounded(total, 60);
-    if minutes >= 60 {
-        5_000_000
-    } else {
-        6_000_000_u64.saturating_add(as_u64(minutes))
+    match Coarse::of(seconds) {
+        Coarse::Years(value) => 1_000_000_u64.saturating_add(as_u64(value)),
+        Coarse::Days(value) => 2_000_000_u64.saturating_add(as_u64(value)),
+        Coarse::Hours(value) => 4_000_000_u64.saturating_add(as_u64(value)),
+        Coarse::Minutes(value) => 6_000_000_u64.saturating_add(as_u64(value)),
     }
 }
 
@@ -296,8 +307,20 @@ mod tests {
         assert_eq!(approx(0), "1m");
         assert_eq!(approx(59), "1m");
         assert_eq!(approx(90), "2m");
+        assert_eq!(approx(3_599), "1h");
         assert_eq!(approx(3_600), "1h");
+        assert_eq!(approx(86_399), "1d");
         assert_eq!(approx(90_000), "1d");
-        assert_eq!(approx(400 * 86_400), "1y");
+        assert_eq!(approx(400 * DAY), "1y");
+    }
+
+    #[test]
+    fn approx_token_tells_apart_what_approx_shows() {
+        let token = |seconds| approx_token(seconds);
+        assert_ne!(token(0), token(90));
+        assert_eq!(token(90), token(120));
+        assert_ne!(token(3_000), token(3_600));
+        assert_eq!(token(86_399), token(86_400));
+        assert_ne!(token(90_000), token(400 * DAY));
     }
 }

@@ -14,13 +14,15 @@
 
 use std::fs;
 use std::path::PathBuf;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::Mutex;
 
 use noctalia_rs::{Context, Op, Result};
 use serde_json::Value;
 
 use crate::duration;
+use crate::file;
 use crate::math::quotient;
+use crate::sync::lock;
 use crate::timer::{
     COMMAND_KEY, FILE_NAME, LAST_COMMAND_KEY, List, STATE_KEY, Timer, sort,
 };
@@ -51,16 +53,12 @@ impl Service {
 
 static SERVICE: Mutex<Service> = Mutex::new(Service::new());
 
-fn lock() -> MutexGuard<'static, Service> {
-    SERVICE.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
 /// Handles one service event.
 ///
 /// # Errors
 /// The signature matches the entry contract; this handler does not fail.
 pub fn update(ctx: &Context) -> Result<Vec<Op>> {
-    let mut service = lock();
+    let mut service = lock(&SERVICE);
     let mut ops = Vec::new();
 
     if !service.loaded {
@@ -70,8 +68,7 @@ pub fn update(ctx: &Context) -> Result<Vec<Op>> {
     // A command or IPC event can arrive after an end time but before the tick.
     // Expire first so no branch sees a timer that is already finished.
     if expire(ctx, &mut service, &mut ops) {
-        publish(ctx, &mut service, &mut ops);
-        schedule(ctx, &mut service, &mut ops);
+        commit(ctx, &mut service, &mut ops);
     }
 
     match ctx.event.as_str() {
@@ -106,8 +103,7 @@ fn start(ctx: &Context, service: &mut Service, ops: &mut Vec<Op>) {
         handle_command(ctx, service, &command, ops);
     }
     expire(ctx, service, ops);
-    publish(ctx, service, ops);
-    schedule(ctx, service, ops);
+    commit(ctx, service, ops);
 }
 
 fn state_path(ctx: &Context) -> PathBuf {
@@ -177,11 +173,7 @@ fn publish(ctx: &Context, service: &mut Service, ops: &mut Vec<Op>) {
         return;
     }
 
-    let path = state_path(ctx);
-    let temporary = PathBuf::from(format!("{}.tmp", path.display()));
-    let result = fs::write(&temporary, &encoded)
-        .and_then(|()| fs::rename(&temporary, &path));
-    match result {
+    match file::write_atomic(&state_path(ctx), &encoded) {
         Ok(()) => service.saved = Some(encoded),
         Err(error) => {
             ops.push(Op::log(format!("timed: cannot save timers: {error}")));
@@ -207,25 +199,28 @@ fn schedule(ctx: &Context, service: &mut Service, ops: &mut Vec<Op>) {
     ops.push(Op::set_interval(delay.unsigned_abs()));
 }
 
+/// Notifies and drops every finished timer, reporting whether any were. The
+/// list is sorted, so the finished ones are the prefix before the first live
+/// timer.
 fn expire(ctx: &Context, service: &mut Service, ops: &mut Vec<Op>) -> bool {
     let now = ctx.now_ms;
-    let mut kept = Vec::with_capacity(service.timers.len());
-    let mut changed = false;
+    let live = service
+        .timers
+        .iter()
+        .position(|timer| {
+            timer.paused || timer.ends_at.is_some_and(|end| end > now)
+        })
+        .unwrap_or(service.timers.len());
+    if live == 0 {
+        return false;
+    }
 
-    for (index, timer) in service.timers.iter().enumerate() {
-        if timer.paused || timer.ends_at.is_some_and(|end| end > now) {
-            kept.extend(service.timers.iter().skip(index).cloned());
-            break;
-        }
+    let finished: Vec<Timer> = service.timers.drain(..live).collect();
+    for timer in &finished {
         notify_finished(ctx, timer, ops);
         ops.push(Op::log(format!("timed: finished {}", timer.id)));
-        changed = true;
     }
-
-    if changed {
-        service.timers = kept;
-    }
-    changed
+    true
 }
 
 fn notify_finished(ctx: &Context, timer: &Timer, ops: &mut Vec<Op>) {
@@ -261,6 +256,19 @@ fn pause_by_id(ctx: &Context, service: &mut Service, id: &str) -> bool {
     timer.remaining_ms = Some(remaining);
     timer.ends_at = None;
     true
+}
+
+fn stop_all(service: &mut Service) -> bool {
+    let had_timers = !service.timers.is_empty();
+    service.timers.clear();
+    had_timers
+}
+
+/// Sorts, publishes, and schedules the next expiry after a change.
+fn commit(ctx: &Context, service: &mut Service, ops: &mut Vec<Op>) {
+    sort(&mut service.timers);
+    publish(ctx, service, ops);
+    schedule(ctx, service, ops);
 }
 
 fn resume_by_id(ctx: &Context, service: &mut Service, id: &str) -> bool {
@@ -371,44 +379,40 @@ fn apply(
     let Some(action) = command.get("action").and_then(Value::as_str) else {
         return;
     };
+    let target = command_id(command);
+    let id = target.as_deref();
     let mut changed = false;
 
     match action {
         "start" => {
-            if let (Some(seconds), Some(id)) =
-                (command_seconds(command), command_id(command))
-            {
+            if let (Some(seconds), Some(new)) = (command_seconds(command), id) {
                 let message = command
                     .get("message")
                     .and_then(Value::as_str)
                     .map(str::to_owned);
-                changed = start_timer(ctx, service, seconds, &id, message, ops);
+                changed = start_timer(ctx, service, seconds, new, message, ops);
             }
         }
         "stop" => {
-            changed =
-                command_id(command).is_some_and(|id| stop_by_id(service, &id));
-            if let Some(id) = command_id(command).filter(|_| changed) {
-                ops.push(Op::log(format!("timed: stopped {id}")));
+            changed = id.is_some_and(|one| stop_by_id(service, one));
+            if let Some(one) = id.filter(|_| changed) {
+                ops.push(Op::log(format!("timed: stopped {one}")));
             }
         }
         "pause" => {
-            changed = command_id(command)
-                .is_some_and(|id| pause_by_id(ctx, service, &id));
-            if let Some(id) = command_id(command).filter(|_| changed) {
-                ops.push(Op::log(format!("timed: paused {id}")));
+            changed = id.is_some_and(|one| pause_by_id(ctx, service, one));
+            if let Some(one) = id.filter(|_| changed) {
+                ops.push(Op::log(format!("timed: paused {one}")));
             }
         }
         "resume" => {
-            changed = command_id(command)
-                .is_some_and(|id| resume_by_id(ctx, service, &id));
-            if let Some(id) = command_id(command).filter(|_| changed) {
-                ops.push(Op::log(format!("timed: resumed {id}")));
+            changed = id.is_some_and(|one| resume_by_id(ctx, service, one));
+            if let Some(one) = id.filter(|_| changed) {
+                ops.push(Op::log(format!("timed: resumed {one}")));
             }
         }
         "stop-all" => {
-            changed = !service.timers.is_empty();
-            service.timers.clear();
+            changed = stop_all(service);
             if changed {
                 ops.push(Op::log("timed: stopped all"));
             }
@@ -416,14 +420,9 @@ fn apply(
         _ => {}
     }
 
-    if !changed {
-        return;
+    if changed {
+        commit(ctx, service, ops);
     }
-    if action != "stop" && action != "stop-all" {
-        sort(&mut service.timers);
-    }
-    publish(ctx, service, ops);
-    schedule(ctx, service, ops);
 }
 
 const fn state_name(timer: &Timer) -> &'static str {
@@ -442,39 +441,30 @@ fn ipc(ctx: &Context, service: &mut Service, ops: &mut Vec<Op>) {
             service.ipc_seq = service.ipc_seq.saturating_add(1);
             let id = format!("{}-{}", ctx.now_ms, service.ipc_seq);
             if start_timer(ctx, service, seconds, &id, message, ops) {
-                sort(&mut service.timers);
-                publish(ctx, service, ops);
-                schedule(ctx, service, ops);
+                commit(ctx, service, ops);
             }
         }
         "stop-all" => {
-            if !service.timers.is_empty() {
-                service.timers.clear();
-                publish(ctx, service, ops);
-                schedule(ctx, service, ops);
+            if stop_all(service) {
+                commit(ctx, service, ops);
                 ops.push(Op::log("timed: stopped all"));
             }
         }
         "stop" => {
             if stop_by_id(service, &payload) {
-                publish(ctx, service, ops);
-                schedule(ctx, service, ops);
+                commit(ctx, service, ops);
                 ops.push(Op::log(format!("timed: stopped {payload}")));
             }
         }
         "pause" => {
             if pause_by_id(ctx, service, &payload) {
-                sort(&mut service.timers);
-                publish(ctx, service, ops);
-                schedule(ctx, service, ops);
+                commit(ctx, service, ops);
                 ops.push(Op::log(format!("timed: paused {payload}")));
             }
         }
         "resume" => {
             if resume_by_id(ctx, service, &payload) {
-                sort(&mut service.timers);
-                publish(ctx, service, ops);
-                schedule(ctx, service, ops);
+                commit(ctx, service, ops);
                 ops.push(Op::log(format!("timed: resumed {payload}")));
             }
         }

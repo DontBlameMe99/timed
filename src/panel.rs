@@ -4,14 +4,15 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::mem;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::Mutex;
 
 use noctalia_rs::{Context, Op, Props, Result, ui};
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 
 use crate::duration;
-use crate::timer::{self, Timer};
-use crate::urgency::{self, Colors};
+use crate::sync::lock;
+use crate::timer::{self, Clock, Timer};
+use crate::urgency::{self, Colors, State};
 
 /// The progress bar is drawn in `1 / PANEL_STEPS` of the timer. At the panel
 /// width that is under a pixel per step, so most ticks draw the same picture.
@@ -66,14 +67,11 @@ impl Panel {
 
 static PANEL: Mutex<Panel> = Mutex::new(Panel::new());
 
-fn lock() -> MutexGuard<'static, Panel> {
-    PANEL.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
 /// Skips a render whose rows would draw exactly the same tree. The state,
 /// theme, input box, and the time each row displays are the only inputs the
 /// panel uses, so a cheap token list can decide before the tree is built.
-fn memo_hit(ctx: &Context, panel: &mut Panel, colors: &Colors) -> bool {
+fn memo_hit(ctx: &Context, panel: &mut Panel, view: &View<'_>) -> bool {
+    let clock = view.clock;
     let memo = &mut panel.memo;
     if ctx.event != "render" || !panel.open {
         memo.valid = false;
@@ -86,18 +84,16 @@ fn memo_hit(ctx: &Context, panel: &mut Panel, colors: &Colors) -> bool {
         memo.state = state.cloned();
         memo.timers = timer::list(ctx);
     }
-    let colors_changed = memo.colors.as_ref() != Some(colors);
+    let colors_changed = memo.colors.as_ref() != Some(view.colors);
     if colors_changed {
-        memo.colors = Some(colors.clone());
+        memo.colors = Some(view.colors.clone());
     }
-    let time_format = ctx.time_format().unwrap_or_default();
-    let date_format = ctx.date_format().unwrap_or_default();
     let formats_changed = memo.time_format.as_deref()
-        != Some(time_format.as_str())
-        || memo.date_format.as_deref() != Some(date_format.as_str());
+        != Some(clock.time.as_str())
+        || memo.date_format.as_deref() != Some(clock.date.as_str());
     if formats_changed {
-        memo.time_format = Some(time_format.clone());
-        memo.date_format = Some(date_format.clone());
+        memo.time_format = Some(clock.time.clone());
+        memo.date_format = Some(clock.date.clone());
     }
     let controls_changed =
         memo.input_key != panel.input_key || memo.error != panel.error;
@@ -109,32 +105,16 @@ fn memo_hit(ctx: &Context, panel: &mut Panel, colors: &Colors) -> bool {
         memo.valid = false;
     }
 
-    let now = ctx.now_ms;
+    let now = clock.now;
     memo.scratch.clear();
     for timer in &memo.timers {
         memo.scratch
             .push(u64::from(timer.fraction_step(now, PANEL_STEPS)));
         memo.scratch
             .push(duration::approx_token(timer.remaining_seconds(now)));
-        let state = match urgency::state(timer, now) {
-            "paused" => 0,
-            "urgent" => 1,
-            "warning" => 2,
-            _ => 3,
-        };
-        memo.scratch.push(state);
-        let format = if timer.remaining_seconds(now) >= 86_400 {
-            &date_format
-        } else {
-            &time_format
-        };
+        memo.scratch.push(State::of(timer, now).token());
         let mut hasher = DefaultHasher::new();
-        timer::format_time(
-            ctx,
-            format,
-            timer.ends_at.unwrap_or(0).div_euclid(1_000),
-        )
-        .hash(&mut hasher);
+        timer.ends_at_text(ctx, clock).hash(&mut hasher);
         memo.scratch.push(hasher.finish());
     }
 
@@ -151,7 +131,7 @@ fn memo_hit(ctx: &Context, panel: &mut Panel, colors: &Colors) -> bool {
 /// # Errors
 /// The signature matches the entry contract; this handler does not fail.
 pub fn update(ctx: &Context) -> Result<Vec<Op>> {
-    let mut panel = lock();
+    let mut panel = lock(&PANEL);
 
     match ctx.event.as_str() {
         "open" => {
@@ -183,82 +163,64 @@ pub fn update(ctx: &Context) -> Result<Vec<Op>> {
     }
 }
 
-/// The parts of the render that come from the clock, the theme, and the shell
-/// locale rather than from the timer list.
+/// The parts of the render that come from the clock and the theme rather than
+/// from the timer list.
 struct View<'a> {
     colors: &'a Colors,
-    now: i64,
-    time_format: &'a str,
-    date_format: &'a str,
+    clock: &'a Clock,
 }
 
 /// One row's drawn values, shared by the change check and the tree.
+#[derive(Hash)]
 struct Row<'a> {
     timer: &'a Timer,
-    state: &'static str,
+    state: State,
     step: u16,
     time: String,
     role: String,
 }
 
 fn collect_rows<'a>(timers: &'a [Timer], view: &View<'_>) -> Vec<Row<'a>> {
+    let now = view.clock.now;
     timers
         .iter()
-        .map(|timer| Row {
-            timer,
-            state: urgency::state(timer, view.now),
-            step: timer.fraction_step(view.now, PANEL_STEPS),
-            time: duration::approx(timer.remaining_seconds(view.now)),
-            role: urgency::role(timer, view.now, view.colors),
+        .map(|timer| {
+            let state = State::of(timer, now);
+            Row {
+                timer,
+                state,
+                step: timer.fraction_step(now, PANEL_STEPS),
+                time: duration::approx(timer.remaining_seconds(now)),
+                role: state.role(view.colors),
+            }
         })
         .collect()
 }
 
 /// A hash of everything the tree draws. The dashboard asks for a render every
-/// second, and rebuilding a 55 node tree costs more than checking this.
+/// second, and rebuilding a 55 node tree costs more than checking this. The
+/// rows carry the drawn time, so the clock itself is left out.
 fn signature(panel: &Panel, view: &View<'_>, rows: &[Row<'_>]) -> u64 {
     let mut hasher = DefaultHasher::new();
-    panel.input_key.hash(&mut hasher);
-    panel.error.hash(&mut hasher);
-    view.time_format.hash(&mut hasher);
-    view.date_format.hash(&mut hasher);
-    view.colors.safe.hash(&mut hasher);
-    view.colors.warning.hash(&mut hasher);
-    view.colors.urgent.hash(&mut hasher);
-    view.colors.idle.hash(&mut hasher);
-    view.colors.use_urgency.hash(&mut hasher);
-    rows.len().hash(&mut hasher);
-    for row in rows {
-        row.timer.id.hash(&mut hasher);
-        row.timer.seconds.hash(&mut hasher);
-        row.timer.label.hash(&mut hasher);
-        row.timer.message.hash(&mut hasher);
-        row.timer.paused.hash(&mut hasher);
-        row.timer.ends_at.hash(&mut hasher);
-        row.state.hash(&mut hasher);
-        row.step.hash(&mut hasher);
-        row.time.hash(&mut hasher);
-        row.role.hash(&mut hasher);
-    }
+    let formats = (&view.clock.time, &view.clock.date);
+    (panel.input_key, &panel.error, formats, view.colors, rows)
+        .hash(&mut hasher);
     hasher.finish()
 }
 
 fn render(ctx: &Context, panel: &mut Panel) -> Vec<Op> {
-    let timers = timer::list(ctx);
     let (colors, mut ops) = urgency::panel_colors(ctx);
-    if memo_hit(ctx, panel, &colors) {
-        return ops;
-    }
-    let time_format = ctx.time_format().unwrap_or_default();
-    let date_format = ctx.date_format().unwrap_or_default();
+    let clock = Clock::read(ctx);
     let view = View {
         colors: &colors,
-        now: ctx.now_ms,
-        time_format: &time_format,
-        date_format: &date_format,
+        clock: &clock,
     };
-    let rows = collect_rows(&timers, &view);
+    if memo_hit(ctx, panel, &view) {
+        return ops;
+    }
 
+    let timers = timer::list(ctx);
+    let rows = collect_rows(&timers, &view);
     let signature = signature(panel, &view, &rows);
     if panel.signature == Some(signature) {
         return ops;
@@ -338,16 +300,7 @@ fn body(ctx: &Context, rows: &[Row<'_>], view: &View<'_>) -> ui::UiNode {
 fn timer_row(ctx: &Context, row: &Row<'_>, view: &View<'_>) -> ui::UiNode {
     let timer = row.timer;
     let paused = timer.paused;
-    let state = row.state;
-    let time_color = if state == "paused" {
-        Some("on_surface_variant".to_owned())
-    } else if view.colors.use_urgency
-        && (state == "warning" || state == "urgent")
-    {
-        Some(row.role.clone())
-    } else {
-        None
-    };
+    let time_color = row.state.text_role(view.colors);
     let mut time = Props::new()
         .text("text", row.time.clone())
         .int("fontSize", 18)
@@ -356,7 +309,8 @@ fn timer_row(ctx: &Context, row: &Row<'_>, view: &View<'_>) -> ui::UiNode {
         time = time.text("color", color);
     }
 
-    let mut children = vec![title_column(ctx, timer, view), ui::label(time)];
+    let mut children =
+        vec![title_column(ctx, timer, view.clock), ui::label(time)];
     children.extend(timer_buttons(ctx, timer, paused));
     ui::column(
         Props::new()
@@ -385,7 +339,7 @@ fn timer_row(ctx: &Context, row: &Row<'_>, view: &View<'_>) -> ui::UiNode {
     )
 }
 
-fn title_column(ctx: &Context, timer: &Timer, view: &View<'_>) -> ui::UiNode {
+fn title_column(ctx: &Context, timer: &Timer, clock: &Clock) -> ui::UiNode {
     ui::column(
         Props::new().int("gap", 2).int("flexGrow", 1),
         vec![
@@ -397,7 +351,7 @@ fn title_column(ctx: &Context, timer: &Timer, view: &View<'_>) -> ui::UiNode {
             ),
             ui::label(
                 Props::new()
-                    .text("text", subtitle(ctx, timer, view))
+                    .text("text", subtitle(ctx, timer, clock))
                     .int("fontSize", 12)
                     .text("color", "on_surface_variant")
                     .int("maxLines", 1),
@@ -447,20 +401,11 @@ fn title(ctx: &Context, timer: &Timer) -> String {
     })
 }
 
-fn subtitle(ctx: &Context, timer: &Timer, view: &View<'_>) -> String {
+fn subtitle(ctx: &Context, timer: &Timer, clock: &Clock) -> String {
     if timer.paused {
         return ctx.tr("panel.paused_left", &[]);
     }
-    let remaining = timer.remaining_seconds(view.now);
-    let format = if remaining >= 86_400 {
-        view.date_format
-    } else {
-        view.time_format
-    };
-    let time = timer.ends_at.map_or_else(String::new, |end| {
-        timer::format_time(ctx, format, end.div_euclid(1_000))
-    });
-    ctx.tr("panel.ends_at", &[("time", time)])
+    ctx.tr("panel.ends_at", &[("time", timer.ends_at_text(ctx, clock))])
 }
 
 fn controls_row(ctx: &Context, panel: &Panel) -> ui::UiNode {
@@ -538,14 +483,7 @@ fn start(ctx: &Context, panel: &mut Panel, text: &str) -> Vec<Op> {
         return render(ctx, panel);
     };
 
-    let mut command = Map::new();
-    command.insert("action".to_owned(), json!("start"));
-    command.insert("seconds".to_owned(), json!(seconds));
-    if let Some(body) = message {
-        command.insert("message".to_owned(), json!(body));
-    }
-    let mut ops = vec![timer::send(ctx, Value::Object(command))];
-
+    let mut ops = vec![timer::start_command(ctx, seconds, message.as_deref())];
     panel.new_text.clear();
     panel.error = None;
     panel.input_key = panel.input_key.saturating_add(1);
@@ -575,14 +513,12 @@ mod tests {
             ends_at: Some(1_700_000_000_000),
             remaining_ms: None,
         };
-        let colors = Colors::defaults();
-        let view = View {
-            colors: &colors,
+        let clock = Clock {
             now: 1_699_910_000_000,
-            time_format: "%H:%M",
-            date_format: "%Y-%m-%d",
+            time: "%H:%M".to_owned(),
+            date: "%Y-%m-%d".to_owned(),
         };
-        let subtitle = subtitle(&ctx, &timer, &view);
+        let subtitle = subtitle(&ctx, &timer, &clock);
         assert!(subtitle.contains("Ends at"));
         assert!(subtitle.contains("2023"), "{subtitle}");
     }

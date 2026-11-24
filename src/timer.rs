@@ -2,17 +2,16 @@
 
 use std::cell::RefCell;
 use std::cmp::Ordering;
-use std::sync::{
-    Mutex, MutexGuard, PoisonError,
-    atomic::{AtomicBool, Ordering as AtomicOrdering},
-};
+use std::sync::Mutex;
 use std::thread_local;
 
 use noctalia_rs::{Context, Op};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::duration::DAY;
 use crate::math::{quotient, remainder};
+use crate::sync::lock;
 
 /// Key the service publishes the timer list to. This is the bridge's shared
 /// plugin state key, so every entry renders when the list changes.
@@ -23,7 +22,7 @@ pub const COLORS_KEY: &str = "timed.colors";
 
 pub const FILE_NAME: &str = "timers.json";
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Hash, Serialize, Deserialize)]
 pub struct Timer {
     pub id: String,
     #[serde(default)]
@@ -62,6 +61,20 @@ impl Timer {
         let remaining = self.remaining_ms(now);
         quotient(remaining, 1_000)
             .saturating_add(i64::from(remainder(remaining, 1_000) != 0))
+    }
+
+    /// The end time as the shell formats it: a clock for today, a date for a
+    /// timer that runs past a day.
+    #[must_use]
+    pub fn ends_at_text(&self, ctx: &Context, clock: &Clock) -> String {
+        let format = if self.remaining_seconds(clock.now) >= DAY {
+            clock.date.as_str()
+        } else {
+            clock.time.as_str()
+        };
+        self.ends_at.map_or_else(String::new, |end| {
+            format_time(ctx, format, end.div_euclid(1_000))
+        })
     }
 
     /// Remaining fraction of the timer, quantized to `1 / steps` units and
@@ -137,6 +150,26 @@ pub fn format_time(ctx: &Context, format: &str, seconds: i64) -> String {
     text
 }
 
+/// The render clock and the shell's time and date formats, read once per
+/// event.
+#[derive(Clone, Debug, Default, Hash)]
+pub struct Clock {
+    pub now: i64,
+    pub time: String,
+    pub date: String,
+}
+
+impl Clock {
+    #[must_use]
+    pub fn read(ctx: &Context) -> Self {
+        Self {
+            now: ctx.now_ms,
+            time: ctx.time_format().unwrap_or_default(),
+            date: ctx.date_format().unwrap_or_default(),
+        }
+    }
+}
+
 pub fn sort(timers: &mut [Timer]) {
     timers.sort_by(|left, right| match (left.paused, right.paused) {
         (false, true) => Ordering::Less,
@@ -151,23 +184,18 @@ pub fn sort(timers: &mut [Timer]) {
     });
 }
 
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
-static SEQUENCE: Mutex<i64> = Mutex::new(0);
-static SEQUENCE_READY: AtomicBool = AtomicBool::new(false);
+static SEQUENCE: Mutex<Option<i64>> = Mutex::new(None);
 
 fn next_sequence(ctx: &Context) -> i64 {
     let mut sequence = lock(&SEQUENCE);
-    if !SEQUENCE_READY.swap(true, AtomicOrdering::Relaxed) {
-        *sequence = ctx
-            .global_state(LAST_COMMAND_KEY)
+    let current = sequence.unwrap_or_else(|| {
+        ctx.global_state(LAST_COMMAND_KEY)
             .and_then(|value| value.as_i64())
-            .unwrap_or(0);
-    }
-    *sequence = ctx.now_ms.max(sequence.saturating_add(1));
-    *sequence
+            .unwrap_or(0)
+    });
+    let next = ctx.now_ms.max(current.saturating_add(1));
+    *sequence = Some(next);
+    next
 }
 
 /// Publishes a command for the service. Every command carries a sequence
@@ -178,6 +206,16 @@ pub fn send(ctx: &Context, mut command: Value) -> Op {
         object.insert("n".to_owned(), json!(next_sequence(ctx)));
     }
     Op::state(COMMAND_KEY, command)
+}
+
+/// Starts a timer, carrying the message into its notification.
+#[must_use]
+pub fn start_command(ctx: &Context, seconds: i64, message: Option<&str>) -> Op {
+    let mut command = json!({ "action": "start", "seconds": seconds });
+    if let (Some(body), Some(object)) = (message, command.as_object_mut()) {
+        object.insert("message".to_owned(), json!(body));
+    }
+    send(ctx, command)
 }
 
 #[must_use]

@@ -28,15 +28,55 @@ jobs:
           profile: community
           root: ${{ github.workspace }}
 
-  checks:
-    name: Catalog and Luau
+  rust:
+    name: Rust
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
         uses: actions/checkout@v7
 
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Lint
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace --release
+
       - name: Check the catalog matches the manifest
         run: python3 .github/scripts/check-catalog.py
+
+      - name: Check licenses and advisories
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+
+      - name: Check the generated plugin directory
+        run: |
+          cargo run --release -- emit "$RUNNER_TEMP/plugin" timed-helper
+          diff -r --exclude=timed-helper "$RUNNER_TEMP/plugin" timed
+
+      - name: Check the committed helper
+        run: |
+          test -x timed/timed-helper
+          if readelf -d timed/timed-helper 2>/dev/null | grep -q NEEDED; then
+            echo "timed-helper is dynamically linked" >&2
+            exit 1
+          fi
+          echo "timed-helper is statically linked"
+
+  luau:
+    name: Luau reference implementation
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v7
 
       - name: Install Luau
         env:
@@ -48,10 +88,10 @@ jobs:
           echo "$RUNNER_TEMP/luau" >> "$GITHUB_PATH"
 
       - name: Test duration parsing
-        run: luau tests/duration_test.luau
+        run: luau bench/luau/tests/duration_test.luau
 
       - name: Test timer commands
-        run: luau tests/timers_test.luau -a "$(cat timed/lib/timers.luau)"
+        run: luau bench/luau/tests/timers_test.luau -a "$(cat bench/luau/lib/timers.luau)"
 
       - name: Install luau-lsp
         env:
@@ -69,5 +109,14 @@ jobs:
           curl -fsSL -o "$RUNNER_TEMP/noctalia.d.luau" \
             "https://raw.githubusercontent.com/noctalia-dev/official-plugins/$DEFINITIONS_COMMIT/noctalia.d.luau"
 
+      # The prelude and the cases are harness scaffolding: the Rust driver
+      # injects their globals ahead of the script, so only the reference
+      # implementation is analyzed.
       - name: Analyze Luau
-        run: luau-lsp analyze --definitions="$RUNNER_TEMP/noctalia.d.luau" timed
+        run: |
+          luau-lsp analyze --definitions="$RUNNER_TEMP/noctalia.d.luau" \
+            bench/luau/lib \
+            bench/luau/bar.luau \
+            bench/luau/panel.luau \
+            bench/luau/launcher.luau \
+            bench/luau/service.luau

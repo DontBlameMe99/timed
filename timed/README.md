@@ -16,7 +16,9 @@ was for.
 
 ## Requirements
 
-The plugin requires a Noctalia release with plugin API 48 or newer.
+The plugin requires a Noctalia release with plugin API 48 or newer, and an
+x86_64 Linux system. The plugin logic runs in a small prebuilt helper binary
+next to `plugin.toml`, so it does not load a Luau entry script of its own.
 
 ## Bar widget
 
@@ -124,3 +126,13 @@ The service sets its update interval to the next timer expiry, capped at once a
 day. A timer due in a year wakes the plugin once a day until it is close, and
 the timer list is published only when it changes. Running timers cost nothing
 between those checks.
+
+The service publishes the timer list in the plugin state under `timed.state`,
+and the bar widget, panel, and launcher send commands on `timed.command`.
+
+The helper is a static binary, written in Rust with
+[noctalia-rs](https://github.com/lumi673/noctalia-rs). The Luau files in this
+directory are generated entry stubs that forward to it; the source of truth is
+the plugin repository.
+
+Timed is licensed under GPL-3.0-or-later, matching noctalia-rs.

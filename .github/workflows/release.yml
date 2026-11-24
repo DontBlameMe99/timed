@@ -12,6 +12,11 @@ on:
           - patch
           - minor
           - major
+      dry_run:
+        description: Build and check without pushing, tagging, or publishing
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: write
@@ -23,8 +28,14 @@ concurrency:
 jobs:
   release:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     env:
       GH_TOKEN: ${{ github.token }}
+      # The helper is static musl so it runs on every x86_64 Linux
+      # distribution. The flags are per target, so the host build scripts that
+      # cargo compiles keep the normal linker.
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
+      CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS: -C link-self-contained=yes
     steps:
       # A write deploy key is the actor that bypasses the main ruleset here.
       - name: Checkout repository
@@ -33,29 +44,84 @@ jobs:
           ref: main
           ssh-key: ${{ secrets.RELEASE_DEPLOY_KEY }}
 
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+          targets: x86_64-unknown-linux-musl
+
       - name: Bump the version
         id: bump
         run: |
           version="$(python3 .github/scripts/bump-version.py "${{ inputs.bump }}")"
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Released version: $version" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Lint
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace --release
+
+      - name: Build the helper
+        run: cargo build --release --target x86_64-unknown-linux-musl
+
+      - name: Check the helper is static
+        run: |
+          if readelf -d target/x86_64-unknown-linux-musl/release/timed 2>/dev/null | grep -q NEEDED; then
+            echo "the helper is dynamically linked" >&2
+            exit 1
+          fi
+          echo "the helper is statically linked"
+
+      - name: Regenerate the plugin directory
+        run: |
+          ./target/x86_64-unknown-linux-musl/release/timed emit timed timed-helper
+          cp target/x86_64-unknown-linux-musl/release/timed timed/timed-helper
 
       - name: Check the catalog
         run: python3 .github/scripts/check-catalog.py
 
+      - name: Check the plugin directory matches the manifest
+        run: |
+          mkdir -p "$RUNNER_TEMP/plugin"
+          ./target/x86_64-unknown-linux-musl/release/timed emit "$RUNNER_TEMP/plugin" timed-helper
+          diff -r --exclude=timed-helper "$RUNNER_TEMP/plugin" timed
+
+      - name: Summarize the release
+        env:
+          VERSION: ${{ steps.bump.outputs.version }}
+        run: |
+          {
+            echo "### Timed $VERSION"
+            echo
+            echo "| Field | Value |"
+            echo "| :-- | :-- |"
+            echo "| Helper | $(stat --format=%s timed/timed-helper) bytes, static x86_64 |"
+            echo "| Plugin API | $(sed -n 's/^plugin_api = //p' timed/plugin.toml) |"
+            echo "| Commit | $(git rev-parse --short=12 HEAD) |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
       - name: Push the version bump
+        if: ${{ !inputs.dry_run }}
         env:
           VERSION: ${{ steps.bump.outputs.version }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add timed/plugin.toml catalog.toml
+          git add -A timed catalog.toml Cargo.toml Cargo.lock
           git commit --message "chore: bump version to $VERSION"
           git push origin HEAD:main
 
       - name: Publish the release
+        if: ${{ !inputs.dry_run }}
         env:
           VERSION: ${{ steps.bump.outputs.version }}
         run: |
           git tag "v$VERSION"
           git push origin "v$VERSION"
           gh release create "v$VERSION" --title "v$VERSION" --generate-notes --verify-tag
+          gh release upload "v$VERSION" timed/timed-helper --clobber

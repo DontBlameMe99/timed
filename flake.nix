@@ -113,7 +113,6 @@
 
           packages = with pkgs; [
             rustToolchain
-            luau
             bacon
             cargo-audit
             cargo-deny

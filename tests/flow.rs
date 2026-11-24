@@ -19,6 +19,7 @@ struct Helper {
     state: Value,
     sequence: usize,
     response: Value,
+    host: Value,
 }
 
 #[expect(
@@ -64,12 +65,19 @@ impl Helper {
             state: json!({}),
             sequence: 0,
             response: json!({}),
+            host: host(),
         }
     }
 
     fn state(&mut self, state: Value, response: Value) -> &mut Self {
         self.state = state;
         self.response = response;
+        self
+    }
+
+    fn now(&mut self, now: i64) -> &mut Self {
+        self.host = host();
+        self.host["now_ms"] = json!(now);
         self
     }
 
@@ -82,7 +90,7 @@ impl Helper {
             "payload": payload,
             "config": config(entry),
             "state": self.state,
-            "host": host(),
+            "host": self.host.clone(),
         });
         let name = format!("{:012}", self.sequence);
         let target = self.run_dir.join(format!("{name}.json"));
@@ -347,6 +355,47 @@ fn ipc_controls_the_timer_list() {
         "ipc",
         json!({ "event": "stop-all", "payload": "" }),
     );
+    assert_eq!(timers(&ops), Some(json!([])));
+
+    drop(helper);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ipc_expires_finished_timers_first() {
+    let root = scratch("ipc-expire");
+    let mut helper = Helper::start(&root);
+    helper
+        .state(json!({}), json!(null))
+        .call("service", "load", json!({}));
+
+    let ops = helper.state(json!({}), json!(null)).call(
+        "service",
+        "ipc",
+        json!({ "event": "start", "payload": "1s tea" }),
+    );
+    let id = timers(&ops).expect("published")[0]["id"]
+        .as_str()
+        .expect("id")
+        .to_owned();
+
+    let ops = helper.now(NOW + 2_000).state(json!({}), json!(null)).call(
+        "service",
+        "ipc",
+        json!({ "event": "list", "payload": "" }),
+    );
+    assert!(
+        ops.iter().any(|op| op["op"] == json!("notify")
+            && op["body"] == json!("tea")),
+        "{ops:?}"
+    );
+    assert!(ops.iter().any(|op| op["op"] == json!("log")
+        && op["message"] == json!(format!("timed: finished {id}"))));
+    let messages = ops
+        .iter()
+        .filter_map(|op| op["message"].as_str())
+        .collect::<Vec<_>>();
+    assert!(messages.contains(&"timed: 0 timer(s)"), "{messages:?}");
     assert_eq!(timers(&ops), Some(json!([])));
 
     drop(helper);

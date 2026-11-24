@@ -67,12 +67,15 @@ pub fn update(ctx: &Context) -> Result<Vec<Op>> {
         start(ctx, &mut service, &mut ops);
         return Ok(ops);
     }
+    // A command or IPC event can arrive after an end time but before the tick.
+    // Expire first so no branch sees a timer that is already finished.
+    if expire(ctx, &mut service, &mut ops) {
+        publish(ctx, &mut service, &mut ops);
+        schedule(ctx, &mut service, &mut ops);
+    }
 
     match ctx.event.as_str() {
         "update" | "resume" => {
-            if expire(ctx, &mut service, &mut ops) {
-                publish(ctx, &mut service, &mut ops);
-            }
             schedule(ctx, &mut service, &mut ops);
         }
         "ipc" => ipc(ctx, &mut service, &mut ops),

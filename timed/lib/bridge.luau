@@ -55,21 +55,6 @@ local COLOR_ROLES = {
 local SETTING_PATHS = {
   "shell.time_format",
   "shell.date_format",
-  "shell.offline_mode",
-  "shell.lang",
-  "shell.language",
-  "shell.corner_radius_scale",
-  "shell.show_close_buttons",
-  "general.language",
-  "bar",
-  "bar.order",
-  "widget",
-  "desktop_widgets",
-  "desktop_widgets.widget",
-  "theme.source",
-  "theme.pure_black_dark",
-  "theme.wallpaper_scheme",
-  "system.monitor.network_poll_seconds",
 }
 
 M.entry = "unknown"

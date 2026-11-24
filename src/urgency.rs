@@ -1,13 +1,78 @@
 //! Progress-based timer colors shared by the bar widget and the panel.
 
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::Mutex;
 
 use noctalia_rs::{Context, Op};
 use serde_json::{Value, json};
 
+use crate::sync::lock;
 use crate::timer::{COLORS_KEY, Timer};
 
-#[derive(Clone, Debug, PartialEq)]
+/// How much of a timer is left, from safe to urgent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum State {
+    Safe,
+    Warning,
+    Urgent,
+    Paused,
+}
+
+impl State {
+    #[must_use]
+    pub fn of(timer: &Timer, now: i64) -> Self {
+        if timer.paused {
+            return Self::Paused;
+        }
+        if timer.within(now, 20) {
+            return Self::Urgent;
+        }
+        if timer.within(now, 50) {
+            return Self::Warning;
+        }
+        Self::Safe
+    }
+
+    /// Distinct number for the render caches that compare states by value.
+    #[must_use]
+    pub const fn token(self) -> u64 {
+        match self {
+            Self::Paused => 0,
+            Self::Urgent => 1,
+            Self::Warning => 2,
+            Self::Safe => 3,
+        }
+    }
+
+    /// Color role for the ring, the progress bar, and the count badge.
+    #[must_use]
+    pub fn role_ref(self, colors: &Colors) -> &str {
+        match self {
+            Self::Paused => "on_surface_variant",
+            Self::Warning if colors.use_urgency => &colors.warning,
+            Self::Urgent if colors.use_urgency => &colors.urgent,
+            Self::Safe | Self::Warning | Self::Urgent => &colors.safe,
+        }
+    }
+
+    #[must_use]
+    pub fn role(self, colors: &Colors) -> String {
+        self.role_ref(colors).to_owned()
+    }
+
+    /// Color role for the remaining time, or `None` for the default text color.
+    #[must_use]
+    pub fn text_role(self, colors: &Colors) -> Option<String> {
+        match self {
+            Self::Paused => Some("on_surface_variant".to_owned()),
+            Self::Warning | Self::Urgent if colors.use_urgency => {
+                Some(self.role(colors))
+            }
+            Self::Safe | Self::Warning | Self::Urgent => None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Hash)]
 pub struct Colors {
     pub safe: String,
     pub warning: String,
@@ -115,76 +180,25 @@ impl Published {
     }
 }
 
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
 static MIRROR: Mutex<Option<Colors>> = Mutex::new(None);
 
 /// Panel-side cache: the widget publishes its colors, so read them once and
 /// follow changes instead of querying on every render.
 #[must_use]
 pub fn panel_colors(ctx: &Context) -> (Colors, Vec<Op>) {
-    let mut guard = lock(&MIRROR);
+    let mut mirror = lock(&MIRROR);
     let mut ops = Vec::new();
-    if guard.is_none() {
+    if mirror.is_none() {
         let value = ctx.global_state(COLORS_KEY);
-        *guard = Some(Colors::from_value(value.as_ref()));
+        *mirror = Some(Colors::from_value(value.as_ref()));
         ops.push(Op::state_watch(COLORS_KEY, "colors"));
     }
-    let colors = guard.clone().unwrap_or_else(Colors::defaults);
+    let colors = mirror.clone().unwrap_or_else(Colors::defaults);
     (colors, ops)
 }
 
 pub fn store_colors(value: Option<&Value>) {
     *lock(&MIRROR) = Some(Colors::from_value(value));
-}
-
-#[must_use]
-pub fn state(timer: &Timer, now: i64) -> &'static str {
-    if timer.paused {
-        return "paused";
-    }
-    if timer.within(now, 20) {
-        return "urgent";
-    }
-    if timer.within(now, 50) {
-        return "warning";
-    }
-    "safe"
-}
-
-#[must_use]
-pub fn role_for_state(state: &str, colors: &Colors) -> String {
-    match state {
-        "urgent" => colors.urgent.clone(),
-        "warning" => colors.warning.clone(),
-        "paused" => "on_surface_variant".to_owned(),
-        _ => colors.safe.clone(),
-    }
-}
-
-#[must_use]
-pub fn role(timer: &Timer, now: i64, colors: &Colors) -> String {
-    role_ref(timer, now, colors).to_owned()
-}
-
-/// Borrowed form for renders that only pass the role to an op or a string
-/// builder, so the common case allocates nothing.
-#[must_use]
-pub fn role_ref<'a>(timer: &Timer, now: i64, colors: &'a Colors) -> &'a str {
-    let state = state(timer, now);
-    if state == "paused" {
-        return "on_surface_variant";
-    }
-    if !colors.use_urgency {
-        return &colors.safe;
-    }
-    match state {
-        "urgent" => &colors.urgent,
-        "warning" => &colors.warning,
-        _ => &colors.safe,
-    }
 }
 
 #[cfg(test)]
@@ -206,31 +220,46 @@ mod tests {
     #[test]
     fn state_uses_remaining_percentage() {
         let timer = timer(100, 100_000);
-        assert_eq!(state(&timer, 0), "safe");
-        assert_eq!(state(&timer, 50_000), "warning");
-        assert_eq!(state(&timer, 80_000), "urgent");
-        assert_eq!(state(&timer, 90_001), "urgent");
+        assert_eq!(State::of(&timer, 0), State::Safe);
+        assert_eq!(State::of(&timer, 50_000), State::Warning);
+        assert_eq!(State::of(&timer, 80_000), State::Urgent);
+        assert_eq!(State::of(&timer, 90_001), State::Urgent);
     }
 
     #[test]
     fn paused_outranks_progress() {
         let mut timer = timer(100, 100_000);
         timer.paused = true;
-        assert_eq!(state(&timer, 100_000), "paused");
+        assert_eq!(State::of(&timer, 100_000), State::Paused);
         assert_eq!(
-            role(&timer, 100_000, &Colors::defaults()),
+            State::Paused.role(&Colors::defaults()),
             "on_surface_variant"
         );
     }
 
     #[test]
     fn urgency_can_be_disabled() {
-        let timer = timer(100, 100_000);
         let colors = Colors {
             use_urgency: false,
             ..Colors::defaults()
         };
-        assert_eq!(role(&timer, 90_000, &colors), "tertiary");
+        assert_eq!(State::Urgent.role(&colors), "tertiary");
+        assert_eq!(State::Urgent.text_role(&colors), None);
+    }
+
+    #[test]
+    fn text_role_follows_pause_and_urgency() {
+        let colors = Colors::defaults();
+        assert_eq!(State::Safe.text_role(&colors), None);
+        assert_eq!(
+            State::Warning.text_role(&colors),
+            Some("secondary".to_owned())
+        );
+        assert_eq!(State::Urgent.text_role(&colors), Some("error".to_owned()));
+        assert_eq!(
+            State::Paused.text_role(&colors),
+            Some("on_surface_variant".to_owned())
+        );
     }
 
     #[test]

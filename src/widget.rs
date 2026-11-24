@@ -6,15 +6,17 @@ use std::f64::consts::TAU;
 use std::fmt::Write;
 use std::fs;
 use std::mem;
-use std::path::PathBuf;
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use noctalia_rs::{Context, Op, Props, Result, ui};
 use serde_json::{Value, json};
 
 use crate::duration;
+use crate::file;
+use crate::sync::lock;
 use crate::timer::{self, Timer};
-use crate::urgency::{self, Colors};
+use crate::urgency::{self, Colors, State};
 
 const PANEL_ID: &str = "dontblameme/timed:panel";
 const RUNNING_INTERVAL_MS: i64 = 1_000;
@@ -22,10 +24,11 @@ const IDLE_INTERVAL_MS: i64 = 60_000;
 const HIDDEN_INTERVAL_MS: i64 = 86_400_000;
 
 const RING_SIZE: u32 = 26;
-const RING_VIEWBOX: i64 = 40;
-const RING_RADIUS: i64 = 16;
-const RING_STROKE: i64 = 4;
-const RING_RADIUS_F: f64 = 16.0;
+const RING_VIEWBOX: u32 = 40;
+const RING_RADIUS: u32 = 16;
+const RING_STROKE: u32 = 4;
+const ARC_FALLBACK: &str = "#CBA6F7";
+const TRACK_FALLBACK: &str = "#4C4F69";
 /// The arc is redrawn in `1 / RING_STEPS` of the circle. At 26 px that is a
 /// third of a pixel, so quantizing saves the file write without a visible
 /// change.
@@ -36,13 +39,9 @@ const RING_STEPS: u16 = 200;
     reason = "independent one-time render flags"
 )]
 struct Widget {
-    instance: Option<String>,
-    paths: Option<(PathBuf, PathBuf)>,
+    path: Option<PathBuf>,
     published: urgency::Published,
-    ring_arc: Option<String>,
-    ring_track: Option<String>,
-    ring_step: u16,
-    ring_count: Option<usize>,
+    ring: Option<Picture>,
     image_set: bool,
     fallback: bool,
     tooltip: Option<String>,
@@ -68,13 +67,9 @@ struct Memo {
 impl Widget {
     const fn new() -> Self {
         Self {
-            instance: None,
-            paths: None,
+            path: None,
             published: urgency::Published::new(),
-            ring_arc: None,
-            ring_track: None,
-            ring_step: 0,
-            ring_count: None,
+            ring: None,
             image_set: false,
             fallback: false,
             tooltip: None,
@@ -97,10 +92,6 @@ impl Widget {
 }
 
 static WIDGET: Mutex<Widget> = Mutex::new(Widget::new());
-
-fn lock() -> MutexGuard<'static, Widget> {
-    WIDGET.lock().unwrap_or_else(PoisonError::into_inner)
-}
 
 /// Returns true when the next render would emit the same picture. The cache
 /// keys on the inputs the widget draws, so a state or theme change, or a move
@@ -150,16 +141,7 @@ fn memo_hit(ctx: &Context, widget: &mut Widget) -> bool {
     if let Some(nearest) = memo.timers.first() {
         memo.scratch
             .push(u64::from(nearest.fraction_step(now, RING_STEPS)));
-        let urgency = if nearest.paused {
-            0
-        } else if nearest.within(now, 20) {
-            1
-        } else if nearest.within(now, 50) {
-            2
-        } else {
-            3
-        };
-        memo.scratch.push(urgency);
+        memo.scratch.push(State::of(nearest, now).token());
     }
     memo.scratch
         .push(u64::from(memo.timers.iter().any(|timer| !timer.paused)));
@@ -186,17 +168,13 @@ pub fn update(ctx: &Context) -> Result<Vec<Op>> {
             Ok(timer::toggle(ctx, timers.first()).into_iter().collect())
         }
         "exit" => {
-            cleanup(ctx, &mut lock());
+            cleanup(&mut lock(&WIDGET));
             Ok(Vec::new())
         }
-        _ => Ok(render(ctx, &mut lock())),
+        _ => Ok(render(ctx, &mut lock(&WIDGET))),
     }
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "one render pass from state to the final op list"
-)]
 fn render(ctx: &Context, widget: &mut Widget) -> Vec<Op> {
     if memo_hit(ctx, widget) {
         return Vec::new();
@@ -219,11 +197,9 @@ fn render(ctx: &Context, widget: &mut Widget) -> Vec<Op> {
 
     let vertical = ctx.bar_vertical();
     let nearest = timers.first();
-    let idle = nearest.is_none();
     let count = timers.len();
     let now = ctx.now_ms;
-    let state = nearest.map_or("idle", |timer| urgency::state(timer, now));
-    let badge = badge_role(&config, state, idle);
+    let badge = badge_role(nearest, now, colors);
 
     let fallback = Fallback {
         config: &config,
@@ -231,34 +207,26 @@ fn render(ctx: &Context, widget: &mut Widget) -> Vec<Op> {
         count,
         badge,
         vertical,
-        state,
         now,
     };
     if widget.fallback {
         ops.extend(fallback_tree(&fallback));
     } else {
-        let showing = config.show_progress
-            && widget.write_ring(
-                ctx,
-                &Ring {
-                    timer: nearest,
-                    count,
-                    show_count: config.show_count,
-                    colors,
-                    idle,
-                },
-                &mut ops,
-            );
+        let ring = Ring {
+            timer: nearest,
+            count,
+            show_count: config.show_count,
+            colors,
+        };
+        let showing =
+            config.show_progress && widget.write_ring(ctx, &ring, &mut ops);
         if showing {
             let spec = Label {
                 nearest,
                 vertical,
                 now,
-                state,
-                badge,
             };
-            let (text, color) = label(&config, &spec);
-            set_label(widget, BarLabel { text, color }, &mut ops);
+            set_label(widget, label(&config, &spec), &mut ops);
         } else {
             widget.fallback = true;
             widget.memo.valid = false;
@@ -313,58 +281,54 @@ impl Config {
     }
 }
 
-fn badge_role<'a>(config: &'a Config, state: &str, idle: bool) -> &'a str {
-    if idle {
-        return &config.colors.idle;
-    }
-    if state == "paused" {
-        return "on_surface_variant";
-    }
-    if config.colors.use_urgency {
-        return match state {
-            "urgent" => &config.colors.urgent,
-            "warning" => &config.colors.warning,
-            _ => &config.colors.safe,
-        };
-    }
-    &config.colors.safe
+/// The badge and the ring share the timer's color, with one of its own while
+/// no timer is running.
+fn badge_role<'a>(
+    nearest: Option<&Timer>,
+    now: i64,
+    colors: &'a Colors,
+) -> &'a str {
+    nearest.map_or_else(
+        || colors.idle.as_str(),
+        |timer| State::of(timer, now).role_ref(colors),
+    )
 }
 
 struct Label<'a> {
     nearest: Option<&'a Timer>,
     vertical: bool,
     now: i64,
-    state: &'a str,
-    badge: &'a str,
-}
-
-fn label(config: &Config, spec: &Label<'_>) -> (Option<String>, String) {
-    let Label {
-        nearest,
-        vertical,
-        now,
-        state,
-        badge,
-    } = *spec;
-    let Some(timer) = nearest else {
-        return (None, "on_surface".to_owned());
-    };
-    if !config.show_text || vertical {
-        return (None, "on_surface".to_owned());
-    }
-    let text = duration::approx(timer.remaining_seconds(now));
-    if state == "paused" {
-        return (Some(text), "on_surface_variant".to_owned());
-    }
-    if config.colors.use_urgency && (state == "warning" || state == "urgent") {
-        return (Some(text), badge.to_owned());
-    }
-    (Some(text), "on_surface".to_owned())
 }
 
 struct BarLabel {
     text: Option<String>,
     color: String,
+}
+
+impl BarLabel {
+    /// No text, in the default text color.
+    fn plain() -> Self {
+        Self {
+            text: None,
+            color: "on_surface".to_owned(),
+        }
+    }
+}
+
+fn label(config: &Config, spec: &Label<'_>) -> BarLabel {
+    let Some(timer) =
+        spec.nearest.filter(|_| config.show_text && !spec.vertical)
+    else {
+        return BarLabel::plain();
+    };
+    let text = duration::approx(timer.remaining_seconds(spec.now));
+    let color = State::of(timer, spec.now)
+        .text_role(&config.colors)
+        .unwrap_or_else(|| "on_surface".to_owned());
+    BarLabel {
+        text: Some(text),
+        color,
+    }
 }
 
 fn set_label(widget: &mut Widget, label: BarLabel, ops: &mut Vec<Op>) {
@@ -396,7 +360,6 @@ struct Fallback<'a> {
     count: usize,
     badge: &'a str,
     vertical: bool,
-    state: &'a str,
     now: i64,
 }
 
@@ -407,7 +370,6 @@ fn fallback_tree(spec: &Fallback<'_>) -> Vec<Op> {
         count,
         badge,
         vertical,
-        state,
         now,
     } = *spec;
     let mut children = Vec::new();
@@ -421,17 +383,8 @@ fn fallback_tree(spec: &Fallback<'_>) -> Vec<Op> {
     {
         let mut label = Props::new()
             .text("text", duration::approx(timer.remaining_seconds(now)));
-        let color = if state == "paused" {
-            Some("on_surface_variant")
-        } else if config.colors.use_urgency
-            && (state == "warning" || state == "urgent")
-        {
-            Some(badge)
-        } else {
-            None
-        };
-        if let Some(role) = color {
-            label = label.text("color", role.to_owned());
+        if let Some(role) = State::of(timer, now).text_role(&config.colors) {
+            label = label.text("color", role);
         }
         children.push(ui::label(label));
     }
@@ -464,26 +417,64 @@ fn count_badge(count: usize, role: &str) -> ui::UiNode {
     )
 }
 
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "two independent render flags from the widget state"
-)]
 struct Ring<'a> {
     timer: Option<&'a Timer>,
     count: usize,
     show_count: bool,
     colors: &'a Colors,
-    idle: bool,
+}
+
+impl Ring<'_> {
+    fn picture(&self, ctx: &Context) -> Picture {
+        let now = ctx.now_ms;
+        let role = self.timer.map_or_else(
+            || self.colors.idle.as_str(),
+            |timer| State::of(timer, now).role_ref(self.colors),
+        );
+        Picture {
+            arc: color(ctx, role, ARC_FALLBACK).to_owned(),
+            track: color(ctx, "outline_variant", TRACK_FALLBACK).to_owned(),
+            step: self
+                .timer
+                .filter(|timer| timer.seconds > 0)
+                .map_or(RING_STEPS, |timer| {
+                    timer.fraction_step(now, RING_STEPS)
+                }),
+            count: self.show_count.then_some(self.count),
+        }
+    }
+}
+
+/// What the ring draws. Keeping it lets a render with the same picture skip
+/// the file write.
+#[derive(Debug, PartialEq)]
+struct Picture {
+    arc: String,
+    track: String,
+    step: u16,
+    count: Option<usize>,
+}
+
+impl Picture {
+    fn svg(&self, ctx: &Context) -> String {
+        let circumference = TAU * f64::from(RING_RADIUS);
+        let fraction = f64::from(self.step) / f64::from(RING_STEPS);
+        let offset = circumference * (1.0 - fraction);
+        let count = count_markup(ctx, &self.arc, self.count);
+        format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{RING_VIEWBOX}\" height=\"{RING_VIEWBOX}\" viewBox=\"0 0 {RING_VIEWBOX} {RING_VIEWBOX}\">\
+             <circle cx=\"20\" cy=\"20\" r=\"{RING_RADIUS}\" fill=\"none\" stroke=\"{}\" stroke-width=\"{RING_STROKE}\"/>\
+             <circle cx=\"20\" cy=\"20\" r=\"{RING_RADIUS}\" fill=\"none\" stroke=\"{}\" stroke-width=\"{RING_STROKE}\" stroke-dasharray=\"{circumference:.2}\" stroke-dashoffset=\"{offset:.2}\" stroke-linecap=\"round\" transform=\"rotate(-90 20 20)\"/>\
+             {count}</svg>",
+            self.track, self.arc
+        )
+    }
 }
 
 impl Widget {
     #[expect(
         clippy::too_many_arguments,
-        reason = "the host context, the render spec, and the op sink"
-    )]
-    #[expect(
-        clippy::excessive_nesting,
-        reason = "one guarded redraw with its file error path"
+        reason = "the context, the render spec, and the op sink"
     )]
     fn write_ring(
         &mut self,
@@ -491,87 +482,54 @@ impl Widget {
         ring: &Ring<'_>,
         ops: &mut Vec<Op>,
     ) -> bool {
-        let now = ctx.now_ms;
-        let step = match ring.timer {
-            Some(timer) if !ring.idle && timer.seconds > 0 => {
-                timer.fraction_step(now, RING_STEPS)
-            }
-            _ => RING_STEPS,
-        };
-        let role = if ring.idle {
-            ring.colors.idle.as_str()
-        } else {
-            ring.timer.map_or(ring.colors.idle.as_str(), |timer| {
-                urgency::role_ref(timer, now, ring.colors)
-            })
-        };
-        let arc = color(ctx, role, "#CBA6F7");
-        let track = color(ctx, "outline_variant", "#4C4F69");
-        let count = ring.show_count.then_some(ring.count);
-
-        // The file is only rewritten when the picture changes, and the arc is
-        // quantized first, so a long timer stops rewriting it every second.
-        let unchanged = self.ring_arc.as_deref() == Some(arc)
-            && self.ring_track.as_deref() == Some(track)
-            && self.ring_step == step
-            && self.ring_count == count;
-        if !unchanged {
-            let circumference = TAU * RING_RADIUS_F;
-            let fraction = f64::from(step) / f64::from(RING_STEPS);
-            let offset = circumference * (1.0 - fraction);
-            let count_text = count_markup(ctx, arc, count);
-            let svg = format!(
-                "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"{RING_VIEWBOX}\" height=\"{RING_VIEWBOX}\" viewBox=\"0 0 {RING_VIEWBOX} {RING_VIEWBOX}\">\
-             <circle cx=\"20\" cy=\"20\" r=\"{RING_RADIUS}\" fill=\"none\" stroke=\"{track}\" stroke-width=\"{RING_STROKE}\"/>\
-             <circle cx=\"20\" cy=\"20\" r=\"{RING_RADIUS}\" fill=\"none\" stroke=\"{arc}\" stroke-width=\"{RING_STROKE}\" stroke-dasharray=\"{circumference:.2}\" stroke-dashoffset=\"{offset:.2}\" stroke-linecap=\"round\" transform=\"rotate(-90 20 20)\"/>\
-             {count_text}</svg>"
-            );
-            if !write_ring_file(ctx, self, &svg) {
-                return false;
-            }
-            self.ring_arc = Some(arc.to_owned());
-            self.ring_track = Some(track.to_owned());
-            self.ring_step = step;
-            self.ring_count = count;
+        let picture = ring.picture(ctx);
+        if self.ring.as_ref() == Some(&picture) {
+            self.show_image(ctx, ops);
+            return true;
         }
-
-        if !self.image_set {
-            ensure_paths(ctx, self);
-            let path = self.paths.as_ref().map_or_default(|(path, _)| {
-                path.to_string_lossy().into_owned()
-            });
-            ops.push(Op::BarImage {
-                path,
-                preserve: true,
-                width: RING_SIZE,
-                height: RING_SIZE,
-            });
-            self.image_set = true;
+        if !write_ring_file(ctx, self, &picture.svg(ctx)) {
+            return false;
         }
+        self.ring = Some(picture);
+        self.show_image(ctx, ops);
         true
+    }
+
+    fn show_image(&mut self, ctx: &Context, ops: &mut Vec<Op>) {
+        if self.image_set {
+            return;
+        }
+        let path = ring_path(ctx, self).map_or_else(String::new, |path| {
+            path.to_string_lossy().into_owned()
+        });
+        ops.push(Op::BarImage {
+            path,
+            preserve: true,
+            width: RING_SIZE,
+            height: RING_SIZE,
+        });
+        self.image_set = true;
     }
 }
 
 fn write_ring_file(ctx: &Context, widget: &mut Widget, svg: &str) -> bool {
-    ensure_paths(ctx, widget);
-    let Some((path, temporary)) = widget.paths.as_ref() else {
-        return false;
-    };
-    fs::write(temporary, svg)
-        .and_then(|()| fs::rename(temporary, path))
-        .is_ok()
+    ring_path(ctx, widget)
+        .is_some_and(|path| file::write_atomic(path, svg).is_ok())
 }
 
-fn ensure_paths(ctx: &Context, widget: &mut Widget) {
-    if widget.paths.is_some() {
-        return;
+/// The ring file keeps the name it got on the first render, so the image op
+/// always points at the same file.
+fn ring_path<'a>(ctx: &Context, widget: &'a mut Widget) -> Option<&'a Path> {
+    if widget.path.is_none() {
+        let name = format!(
+            "{}-{}",
+            ctx.bar_output_name().unwrap_or("bar"),
+            ctx.now_ms
+        );
+        widget.path =
+            Some(ctx.data_dir.join(format!("ring-{}.svg", sanitize(&name))));
     }
-    let name =
-        format!("{}-{}", ctx.bar_output_name().unwrap_or("bar"), ctx.now_ms);
-    let instance = widget.instance.get_or_insert_with(|| sanitize(&name));
-    let path = ctx.data_dir.join(format!("ring-{instance}.svg"));
-    let temporary = PathBuf::from(format!("{}.tmp", path.display()));
-    widget.paths = Some((path, temporary));
+    widget.path.as_deref()
 }
 
 fn sanitize(name: &str) -> String {
@@ -589,11 +547,9 @@ fn sanitize(name: &str) -> String {
         .collect()
 }
 
-fn cleanup(ctx: &Context, widget: &mut Widget) {
-    ensure_paths(ctx, widget);
-    if let Some((path, temporary)) = widget.paths.as_ref() {
+fn cleanup(widget: &mut Widget) {
+    if let Some(path) = widget.path.take() {
         let _ = fs::remove_file(path);
-        let _ = fs::remove_file(temporary);
     }
 }
 
@@ -660,7 +616,7 @@ fn color<'a>(ctx: &'a Context, role: &str, fallback: &'a str) -> &'a str {
 static FONT: Mutex<Option<String>> = Mutex::new(None);
 
 fn font_family(ctx: &Context) -> String {
-    let mut font = FONT.lock().unwrap_or_else(PoisonError::into_inner);
+    let mut font = lock(&FONT);
     font.get_or_insert_with(|| {
         ctx.setting_value("shell.font_family")
             .and_then(|value| value.as_str().map(str::to_owned))
@@ -691,6 +647,18 @@ mod tests {
     use crate::test_context;
     use crate::timer::COLORS_KEY;
 
+    fn running() -> Timer {
+        Timer {
+            id: "one".to_owned(),
+            seconds: 100,
+            label: "1m 40s".to_owned(),
+            message: None,
+            paused: false,
+            ends_at: Some(1_100_000),
+            remaining_ms: None,
+        }
+    }
+
     #[test]
     fn sanitize_keeps_safe_name_characters() {
         assert_eq!(sanitize("DP-1-1700"), "DP-1-1700");
@@ -704,29 +672,21 @@ mod tests {
 
     #[test]
     fn badge_role_prefers_idle_then_paused() {
-        let ctx = test_context::context(
-            "render",
-            json!({ "hide_when_idle": false }),
-            json!({}),
-            json!({ "now_ms": 1_000, "colors": { "primary": "#111" } }),
+        let colors = Colors::defaults();
+        assert_eq!(badge_role(None, 1_090_000, &colors), "primary");
+
+        let mut paused = running();
+        paused.paused = true;
+        assert_eq!(
+            badge_role(Some(&paused), 1_090_000, &colors),
+            "on_surface_variant"
         );
-        let config = Config::read(&ctx);
-        assert_eq!(badge_role(&config, "safe", true), "primary");
-        assert_eq!(badge_role(&config, "paused", false), "on_surface_variant");
-        assert_eq!(badge_role(&config, "urgent", false), "error");
+        assert_eq!(badge_role(Some(&running()), 1_090_000, &colors), "error");
     }
 
     #[test]
     fn label_hides_when_vertical_or_disabled() {
-        let timer = Timer {
-            id: "one".to_owned(),
-            seconds: 600,
-            label: "10m".to_owned(),
-            message: None,
-            paused: false,
-            ends_at: Some(601_000),
-            remaining_ms: None,
-        };
+        let timer = running();
         let ctx = test_context::context(
             "render",
             json!({ "show_text": false }),
@@ -738,15 +698,16 @@ mod tests {
             nearest: Some(&timer),
             vertical: false,
             now: 1_000,
-            state: "safe",
-            badge: "primary",
         };
-        assert_eq!(label(&config, &spec), (None, "on_surface".to_owned()));
+        let hidden = label(&config, &spec);
+        assert_eq!(hidden.text, None);
+        assert_eq!(hidden.color, "on_surface");
+
         let vertical = Label {
             vertical: true,
             ..spec
         };
-        assert_eq!(label(&config, &vertical), (None, "on_surface".to_owned()));
+        assert_eq!(label(&config, &vertical).text, None);
     }
 
     #[test]

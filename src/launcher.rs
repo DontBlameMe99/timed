@@ -9,13 +9,14 @@
 //!   /timer stop     list timers to stop
 //!   /timer stop all stop every timer
 
-use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::sync::Mutex;
 
 use noctalia_rs::{Context, Op, Result};
-use serde_json::{Map, Value, json};
+use serde_json::{Value, json};
 
 use crate::duration;
-use crate::timer::{self, Timer};
+use crate::sync::lock;
+use crate::timer::{self, Clock, Timer};
 
 struct Launcher {
     suppressed: bool,
@@ -29,10 +30,6 @@ impl Launcher {
 
 static LAUNCHER: Mutex<Launcher> = Mutex::new(Launcher::new());
 
-fn lock() -> MutexGuard<'static, Launcher> {
-    LAUNCHER.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
 /// Handles one launcher event.
 ///
 /// # Errors
@@ -42,7 +39,7 @@ pub fn update(ctx: &Context) -> Result<Vec<Op>> {
         "query" => {
             let text = ctx.payload_str("text").unwrap_or_default();
             let source = ctx.payload_str("source").unwrap_or_default();
-            let mut launcher = lock();
+            let mut launcher = lock(&LAUNCHER);
             let suppressed = launcher.suppressed;
             launcher.suppressed = false;
             if source == "state" && suppressed {
@@ -56,18 +53,11 @@ pub fn update(ctx: &Context) -> Result<Vec<Op>> {
             let ops = activate(ctx, &id);
             // The original clears its query after sending a command so the
             // following state change does not redraw stale rows.
-            lock().suppressed = !ops.is_empty();
+            lock(&LAUNCHER).suppressed = !ops.is_empty();
             Ok(ops)
         }
         _ => Ok(Vec::new()),
     }
-}
-
-/// The clock and the shell's date formats, which every row subtitle needs.
-struct View<'a> {
-    now: i64,
-    time_format: &'a str,
-    date_format: &'a str,
 }
 
 struct Action<'a> {
@@ -134,26 +124,21 @@ fn start_row(ctx: &Context, query: &str) -> Value {
     })
 }
 
-fn action_row(ctx: &Context, action: &Action<'_>, view: &View<'_>) -> Value {
+fn action_row(ctx: &Context, action: &Action<'_>, clock: &Clock) -> Value {
     let timer = action.timer;
-    let remaining = timer.remaining_seconds(view.now);
+    let remaining = timer.remaining_seconds(clock.now);
     let subtitle = if timer.paused {
         ctx.tr(
             "launcher.paused_at",
             &[("duration", duration::approx(remaining))],
         )
     } else {
-        let format = if remaining >= 86_400 {
-            view.date_format
-        } else {
-            view.time_format
-        };
-        let time = timer.ends_at.map_or_else(String::new, |end| {
-            timer::format_time(ctx, format, end.div_euclid(1_000))
-        });
         ctx.tr(
             "launcher.ends_at",
-            &[("time", time), ("duration", duration::approx(remaining))],
+            &[
+                ("time", timer.ends_at_text(ctx, clock)),
+                ("duration", duration::approx(remaining)),
+            ],
         )
     };
     let glyph = match action.name {
@@ -171,18 +156,11 @@ fn action_row(ctx: &Context, action: &Action<'_>, view: &View<'_>) -> Value {
 }
 
 fn rows_for(ctx: &Context, name: &str, paused: Option<bool>) -> Vec<Value> {
-    let now = ctx.now_ms;
-    let time_format = ctx.time_format().unwrap_or_default();
-    let date_format = ctx.date_format().unwrap_or_default();
-    let view = View {
-        now,
-        time_format: &time_format,
-        date_format: &date_format,
-    };
+    let clock = Clock::read(ctx);
     let rows: Vec<Value> = timer::list(ctx)
         .iter()
         .filter(|timer| paused.is_none_or(|want| timer.paused == want))
-        .map(|timer| action_row(ctx, &Action { name, timer }, &view))
+        .map(|timer| action_row(ctx, &Action { name, timer }, &clock))
         .collect();
     if rows.is_empty() {
         return vec![empty_row(ctx)];
@@ -236,13 +214,8 @@ fn activate(ctx: &Context, id: &str) -> Vec<Op> {
             let Ok(seconds) = raw_seconds.parse::<i64>() else {
                 return Vec::new();
             };
-            let mut command = Map::new();
-            command.insert("action".to_owned(), json!("start"));
-            command.insert("seconds".to_owned(), json!(seconds));
-            if !message.is_empty() {
-                command.insert("message".to_owned(), json!(message));
-            }
-            vec![timer::send(ctx, Value::Object(command))]
+            let body = (!message.is_empty()).then_some(message);
+            vec![timer::start_command(ctx, seconds, body)]
         }
         _ => Vec::new(),
     }

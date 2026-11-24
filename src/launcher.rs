@@ -149,7 +149,7 @@ fn action_row(ctx: &Context, action: &Action<'_>, view: &View<'_>) -> Value {
             view.time_format
         };
         let time = timer.ends_at.map_or_else(String::new, |end| {
-            ctx.format_time_at(format, Some(end.div_euclid(1_000)), None)
+            timer::format_time(ctx, format, end.div_euclid(1_000))
         });
         ctx.tr(
             "launcher.ends_at",

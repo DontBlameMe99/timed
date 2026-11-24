@@ -3,7 +3,9 @@
 //! panel; right-clicking pauses or resumes the nearest timer.
 
 use std::f64::consts::TAU;
+use std::fmt::Write;
 use std::fs;
+use std::mem;
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
@@ -47,6 +49,20 @@ struct Widget {
     text: Option<String>,
     color: Option<String>,
     interval: Option<i64>,
+    memo: Memo,
+}
+
+#[derive(Default)]
+struct Memo {
+    valid: bool,
+    state: Option<Value>,
+    config: Option<Value>,
+    colors: Option<Value>,
+    bar: Option<Value>,
+    setting: Option<Value>,
+    timers: Vec<Timer>,
+    tokens: Vec<u64>,
+    scratch: Vec<u64>,
 }
 
 impl Widget {
@@ -65,6 +81,17 @@ impl Widget {
             text: None,
             color: None,
             interval: None,
+            memo: Memo {
+                valid: false,
+                state: None,
+                config: None,
+                colors: None,
+                bar: None,
+                setting: None,
+                timers: Vec::new(),
+                tokens: Vec::new(),
+                scratch: Vec::new(),
+            },
         }
     }
 }
@@ -73,6 +100,76 @@ static WIDGET: Mutex<Widget> = Mutex::new(Widget::new());
 
 fn lock() -> MutexGuard<'static, Widget> {
     WIDGET.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Returns true when the next render would emit the same picture. The cache
+/// keys on the inputs the widget draws, so a state or theme change, or a move
+/// of the drawn clock or ring, forces a fresh tree.
+fn memo_hit(ctx: &Context, widget: &mut Widget) -> bool {
+    let memo = &mut widget.memo;
+    if ctx.event != "render"
+        || ctx.payload_str("source").as_deref() == Some("load")
+        || ctx.setting("shell.font_family").is_none()
+    {
+        memo.valid = false;
+        return false;
+    }
+
+    let state = ctx.state.get("timers");
+    let state_changed = memo.state.as_ref() != state;
+    if state_changed {
+        memo.state = state.cloned();
+        memo.timers = timer::list(ctx);
+    }
+    let config_changed = memo.config.as_ref() != Some(&ctx.config);
+    if config_changed {
+        memo.config = Some(ctx.config.clone());
+    }
+    let colors = ctx.host.get("colors");
+    let bar = ctx.host.get("bar");
+    let setting = ctx.host.get("setting");
+    let host_changed = memo.colors.as_ref() != colors
+        || memo.bar.as_ref() != bar
+        || memo.setting.as_ref() != setting;
+    if host_changed {
+        memo.colors = colors.cloned();
+        memo.bar = bar.cloned();
+        memo.setting = setting.cloned();
+    }
+    if state_changed || config_changed || host_changed {
+        memo.valid = false;
+    }
+
+    let now = ctx.now_ms;
+    memo.scratch.clear();
+    for timer in &memo.timers {
+        memo.scratch
+            .push(duration::approx_token(timer.remaining_seconds(now)));
+        memo.scratch.push(u64::from(timer.paused));
+    }
+    if let Some(nearest) = memo.timers.first() {
+        memo.scratch
+            .push(u64::from(nearest.fraction_step(now, RING_STEPS)));
+        let urgency = if nearest.paused {
+            0
+        } else if nearest.within(now, 20) {
+            1
+        } else if nearest.within(now, 50) {
+            2
+        } else {
+            3
+        };
+        memo.scratch.push(urgency);
+    }
+    memo.scratch
+        .push(u64::from(memo.timers.iter().any(|timer| !timer.paused)));
+
+    if memo.valid && memo.scratch == memo.tokens {
+        return true;
+    }
+    mem::swap(&mut memo.scratch, &mut memo.tokens);
+    memo.valid = true;
+    false
 }
 
 /// Handles one widget event.
@@ -96,7 +193,14 @@ pub fn update(ctx: &Context) -> Result<Vec<Op>> {
     }
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one render pass from state to the final op list"
+)]
 fn render(ctx: &Context, widget: &mut Widget) -> Vec<Op> {
+    if memo_hit(ctx, widget) {
+        return Vec::new();
+    }
     let config = Config::read(ctx);
     let colors = &config.colors;
     let mut ops = Vec::new();
@@ -125,7 +229,7 @@ fn render(ctx: &Context, widget: &mut Widget) -> Vec<Op> {
         config: &config,
         nearest,
         count,
-        badge: &badge,
+        badge,
         vertical,
         state,
         now,
@@ -151,12 +255,13 @@ fn render(ctx: &Context, widget: &mut Widget) -> Vec<Op> {
                 vertical,
                 now,
                 state,
-                badge: &badge,
+                badge,
             };
             let (text, color) = label(&config, &spec);
             set_label(widget, BarLabel { text, color }, &mut ops);
         } else {
             widget.fallback = true;
+            widget.memo.valid = false;
             ops.extend(fallback_tree(&fallback));
         }
     }
@@ -208,17 +313,21 @@ impl Config {
     }
 }
 
-fn badge_role(config: &Config, state: &str, idle: bool) -> String {
+fn badge_role<'a>(config: &'a Config, state: &str, idle: bool) -> &'a str {
     if idle {
-        return config.colors.idle.clone();
+        return &config.colors.idle;
     }
     if state == "paused" {
-        return "on_surface_variant".to_owned();
+        return "on_surface_variant";
     }
     if config.colors.use_urgency {
-        return urgency::role_for_state(state, &config.colors);
+        return match state {
+            "urgent" => &config.colors.urgent,
+            "warning" => &config.colors.warning,
+            _ => &config.colors.safe,
+        };
     }
-    config.colors.safe.clone()
+    &config.colors.safe
 }
 
 struct Label<'a> {
@@ -390,14 +499,13 @@ impl Widget {
             _ => RING_STEPS,
         };
         let role = if ring.idle {
-            ring.colors.idle.clone()
+            ring.colors.idle.as_str()
         } else {
-            ring.timer.map_or_else(
-                || ring.colors.idle.clone(),
-                |timer| urgency::role(timer, now, ring.colors),
-            )
+            ring.timer.map_or(ring.colors.idle.as_str(), |timer| {
+                urgency::role_ref(timer, now, ring.colors)
+            })
         };
-        let arc = color(ctx, &role, "#CBA6F7");
+        let arc = color(ctx, role, "#CBA6F7");
         let track = color(ctx, "outline_variant", "#4C4F69");
         let count = ring.show_count.then_some(ring.count);
 
@@ -509,27 +617,39 @@ fn tooltip(
         return Some(Value::String(empty));
     }
 
-    let mut rows = Vec::with_capacity(timers.len());
-    let mut keys = Vec::with_capacity(timers.len());
+    let mut keys = String::new();
     for timer in timers {
-        let left = duration::approx(timer.remaining_seconds(now));
-        let title = timer.message.clone().unwrap_or_else(|| {
-            ctx.tr("bar.timer", &[("duration", timer.label.clone())])
-        });
+        if !keys.is_empty() {
+            keys.push('|');
+        }
         let value = if timer.paused {
+            let left = duration::approx(timer.remaining_seconds(now));
             ctx.tr("bar.paused", &[("time", left)])
         } else {
-            left
+            duration::approx(timer.remaining_seconds(now))
         };
-        keys.push(format!("{}={value}", timer.id));
-        rows.push(json!({ "key": title, "value": value }));
+        let _ = write!(keys, "{}={value}", timer.id);
     }
-
-    let key = keys.join("|");
-    if widget.tooltip.as_deref() == Some(key.as_str()) {
+    if widget.tooltip.as_deref() == Some(keys.as_str()) {
         return None;
     }
-    widget.tooltip = Some(key);
+    widget.tooltip = Some(keys);
+
+    let rows = timers
+        .iter()
+        .map(|timer| {
+            let left = duration::approx(timer.remaining_seconds(now));
+            let title = timer.message.clone().unwrap_or_else(|| {
+                ctx.tr("bar.timer", &[("duration", timer.label.clone())])
+            });
+            let value = if timer.paused {
+                ctx.tr("bar.paused", &[("time", left)])
+            } else {
+                left
+            };
+            json!({ "key": title, "value": value })
+        })
+        .collect();
     Some(Value::Array(rows))
 }
 
@@ -569,6 +689,7 @@ fn xml_escape(text: &str) -> String {
 mod tests {
     use super::*;
     use crate::test_context;
+    use crate::timer::COLORS_KEY;
 
     #[test]
     fn sanitize_keeps_safe_name_characters() {
@@ -626,5 +747,84 @@ mod tests {
             ..spec
         };
         assert_eq!(label(&config, &vertical), (None, "on_surface".to_owned()));
+    }
+
+    #[test]
+    fn memo_skips_unchanged_renders_and_wakes_on_updates() {
+        let now: i64 = 1_800_000_000_000;
+        let config = json!({
+            "show_text": true,
+            "show_count": true,
+            "show_progress": true,
+            "hide_when_idle": false,
+            "use_urgency_colors": true,
+        });
+        let timers = |label: &str| {
+            json!({ "timers": [{
+                "id": "one",
+                "seconds": 10,
+                "label": label,
+                "paused": false,
+                "endsAt": now + 10_000,
+            }] })
+        };
+        let host = |color: &str| {
+            json!({
+                "now_ms": now,
+                "bar": { "vertical": false, "output_name": "DP-1" },
+                "colors": { "tertiary": color },
+                "setting": { "shell.font_family": "sans-serif" },
+            })
+        };
+        let mut widget = Widget::new();
+
+        let context = test_context::context(
+            "render",
+            config.clone(),
+            timers("10s"),
+            host("#111111"),
+        );
+        assert!(!render(&context, &mut widget).is_empty());
+        assert!(render(&context, &mut widget).is_empty());
+
+        let changed = test_context::context(
+            "render",
+            config.clone(),
+            timers("changed"),
+            host("#111111"),
+        );
+        assert!(!render(&changed, &mut widget).is_empty());
+
+        let mut later = test_context::context(
+            "render",
+            config.clone(),
+            timers("changed"),
+            host("#111111"),
+        );
+        later.now_ms = now.saturating_add(200);
+        assert!(!render(&later, &mut widget).is_empty());
+
+        let mut themed_config = config;
+        themed_config["safe_color"] = json!("primary");
+        let themed = test_context::context(
+            "render",
+            themed_config,
+            timers("changed"),
+            host("#222222"),
+        );
+        assert!(render(&themed, &mut widget).iter().any(|op| {
+            serde_json::to_value(op).expect("op")
+                == json!({
+                    "op": "state_set",
+                    "key": COLORS_KEY,
+                    "value": {
+                        "safe": "primary",
+                        "warning": "secondary",
+                        "urgent": "error",
+                        "idle": "primary",
+                        "useUrgency": true,
+                    },
+                })
+        }));
     }
 }

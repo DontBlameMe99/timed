@@ -4,6 +4,8 @@
 //! repeat. A bare number after a unit takes the next smaller unit, so 1h5 is
 //! 1 hour 5 minutes and 1s4h is 1 second 4 hours. A lone number means minutes.
 
+use std::fmt::Write;
+
 use crate::math::{quotient, remainder};
 
 const YEAR: i64 = 31_536_000;
@@ -32,41 +34,27 @@ const fn next_unit(unit: char) -> Option<char> {
 
 #[must_use]
 pub fn parse(input: &str) -> Option<i64> {
-    let text: String = input
-        .to_ascii_lowercase()
-        .chars()
-        .filter(|character| !character.is_ascii_whitespace())
-        .collect();
-    if text.is_empty() {
-        return None;
-    }
-
-    let bytes = text.as_bytes();
-    let mut index = 0;
+    let bytes = input.as_bytes();
+    let mut index: usize = 0;
     let mut total: i64 = 0;
-    let mut last: Option<char> = None;
-
-    while index < bytes.len() {
-        let start = index;
-        while bytes.get(index).is_some_and(u8::is_ascii_digit) {
+    let mut last = None;
+    while let Some(&byte) = bytes.get(index) {
+        if byte.is_ascii_whitespace() {
             index = index.saturating_add(1);
+            continue;
         }
-        if start == index {
-            return None;
-        }
-        let value: i64 = text.get(start..index)?.parse().ok()?;
-
-        let unit = match bytes.get(index).copied().map(char::from) {
-            Some(character) if unit_seconds(character).is_some() => {
-                index = index.saturating_add(1);
-                character
-            }
-            _ => match last {
-                Some(previous) => next_unit(previous)?,
-                None => 'm',
-            },
+        let value = read_number(bytes, &mut index)?;
+        let (unit, next) = match unit_at(bytes, index) {
+            Some(found) => found,
+            None => (
+                match last {
+                    Some(previous) => next_unit(previous)?,
+                    None => 'm',
+                },
+                index,
+            ),
         };
-
+        index = next;
         total = total.checked_add(value.checked_mul(unit_seconds(unit)?)?)?;
         last = Some(unit);
     }
@@ -75,6 +63,34 @@ pub fn parse(input: &str) -> Option<i64> {
         return None;
     }
     Some(total)
+}
+
+fn read_number(bytes: &[u8], index: &mut usize) -> Option<i64> {
+    let mut value: i64 = 0;
+    let mut seen = false;
+    while let Some(&byte) = bytes.get(*index) {
+        if byte.is_ascii_whitespace() {
+            *index = index.saturating_add(1);
+        } else if byte.is_ascii_digit() {
+            let digit = i64::from(byte.saturating_sub(b'0'));
+            value = value.checked_mul(10)?.checked_add(digit)?;
+            seen = true;
+            *index = index.saturating_add(1);
+        } else {
+            break;
+        }
+    }
+    seen.then_some(value)
+}
+
+fn unit_at(bytes: &[u8], index: usize) -> Option<(char, usize)> {
+    let mut at = index;
+    while bytes.get(at).is_some_and(u8::is_ascii_whitespace) {
+        at = at.saturating_add(1);
+    }
+    let byte = *bytes.get(at)?;
+    let unit = byte.to_ascii_lowercase() as char;
+    unit_seconds(unit).map(|_| (unit, at.saturating_add(1)))
 }
 
 /// Splits launcher or IPC text into a duration and an optional message.
@@ -93,8 +109,8 @@ pub fn split(text: &str) -> Option<(i64, Option<String>)> {
     let end = input
         .find(|character: char| character.is_ascii_whitespace())
         .unwrap_or(input.len());
-    let seconds = parse(input.get(..end)?)?;
-    let rest = input.get(end..).unwrap_or_default().trim();
+    let seconds = parse(&input[..end])?;
+    let rest = input[end..].trim();
     let message = (!rest.is_empty()).then(|| rest.to_owned());
     Some((seconds, message))
 }
@@ -106,13 +122,15 @@ pub fn clock(seconds: i64) -> String {
     let hours = quotient(remainder(total, 86_400), 3_600);
     let minutes = quotient(remainder(total, 3_600), 60);
     let secs = remainder(total, 60);
+    let mut out = String::with_capacity(16);
     if days > 0 {
-        format!("{days}d {hours}:{minutes:02}:{secs:02}")
+        let _ = write!(out, "{days}d {hours}:{minutes:02}:{secs:02}");
     } else if hours > 0 {
-        format!("{hours}:{minutes:02}:{secs:02}")
+        let _ = write!(out, "{hours}:{minutes:02}:{secs:02}");
     } else {
-        format!("{minutes}:{secs:02}")
+        let _ = write!(out, "{minutes}:{secs:02}");
     }
+    out
 }
 
 #[must_use]
@@ -124,7 +142,7 @@ pub fn human(seconds: i64) -> String {
     let minutes = quotient(remainder(total, 3_600), 60);
     let secs = remainder(total, 60);
 
-    let mut parts = Vec::new();
+    let mut out = String::with_capacity(24);
     for (value, unit) in [
         (years, 'y'),
         (days, 'd'),
@@ -132,14 +150,19 @@ pub fn human(seconds: i64) -> String {
         (minutes, 'm'),
         (secs, 's'),
     ] {
-        if value > 0 {
-            parts.push(format!("{value}{unit}"));
-        }
+        push_part(&mut out, value, unit);
     }
-    if parts.is_empty() {
-        return "0s".to_owned();
+    if out.is_empty() { "0s".to_owned() } else { out }
+}
+
+fn push_part(out: &mut String, value: i64, unit: char) {
+    if value <= 0 {
+        return;
     }
-    parts.join(" ")
+    if !out.is_empty() {
+        out.push(' ');
+    }
+    let _ = write!(out, "{value}{unit}");
 }
 
 /// Coarse form for the bar: the nearest whole unit, such as 4h, 30m, or 1m.
@@ -173,6 +196,40 @@ pub fn approx(seconds: i64) -> String {
 
 fn rounded(value: i64, divisor: i64) -> i64 {
     quotient(value.saturating_add(quotient(divisor, 2)), divisor)
+}
+
+/// Allocation-free identity of the string `approx` would return. Render
+/// caches use it to tell when the coarse countdown actually moves.
+#[must_use]
+pub fn approx_token(seconds: i64) -> u64 {
+    let total = seconds.max(0);
+    if total < 60 {
+        return 1;
+    }
+    if total >= 86_400 {
+        let days = rounded(total, 86_400);
+        if days >= 365 {
+            return 1_000_000_u64.saturating_add(as_u64(rounded(days, 365)));
+        }
+        return 2_000_000_u64.saturating_add(as_u64(days));
+    }
+    if total >= 3_600 {
+        let hours = rounded(total, 3_600);
+        if hours >= 24 {
+            return 3_000_000;
+        }
+        return 4_000_000_u64.saturating_add(as_u64(hours));
+    }
+    let minutes = rounded(total, 60);
+    if minutes >= 60 {
+        5_000_000
+    } else {
+        6_000_000_u64.saturating_add(as_u64(minutes))
+    }
+}
+
+fn as_u64(value: i64) -> u64 {
+    u64::try_from(value).unwrap_or(0)
 }
 
 #[cfg(test)]

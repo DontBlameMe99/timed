@@ -10,6 +10,7 @@ use noctalia_rs::{Context, Op, Props, Result, ui};
 use serde_json::{Value, json};
 
 use crate::duration;
+use crate::i18n::tr;
 use crate::sync::lock;
 use crate::timer::{self, Clock, Timer};
 use crate::urgency::{self, Colors, State};
@@ -260,7 +261,7 @@ fn header_children(ctx: &Context, count: usize) -> Vec<ui::UiNode> {
         Props::new().int("gap", 8).text("align", "center"),
         vec![ui::label(
             Props::new()
-                .text("text", ctx.tr("panel.title", &[]))
+                .text("text", tr(ctx, "panel.title", &[]))
                 .int("fontSize", 18)
                 .text("fontWeight", "bold"),
         )],
@@ -268,7 +269,7 @@ fn header_children(ctx: &Context, count: usize) -> Vec<ui::UiNode> {
     if count > 1 {
         children.push(ui::button(
             Props::new()
-                .text("text", ctx.tr("panel.stop_all", &[]))
+                .text("text", tr(ctx, "panel.stop_all", &[]))
                 .text("variant", "ghost")
                 .text("controlSize", "sm")
                 .call("onClick", "stop_all"),
@@ -287,7 +288,7 @@ fn body(ctx: &Context, rows: &[Row<'_>], view: &View<'_>) -> ui::UiNode {
                 .int("gap", 6),
             vec![ui::label(
                 Props::new()
-                    .text("text", ctx.tr("panel.empty", &[]))
+                    .text("text", tr(ctx, "panel.empty", &[]))
                     .text("color", "on_surface_variant"),
             )],
         );
@@ -366,15 +367,15 @@ fn timer_buttons(
     paused: bool,
 ) -> Vec<ui::UiNode> {
     let (glyph, tip) = if paused {
-        ("player-play", ctx.tr("panel.resume", &[]))
+        ("player-play", tr(ctx, "panel.resume", &[]))
     } else {
-        ("player-pause", ctx.tr("panel.pause", &[]))
+        ("player-pause", tr(ctx, "panel.pause", &[]))
     };
     vec![
         action_button(glyph, tip, &format!("toggle:{}", timer.id)),
         action_button(
             "player-stop",
-            ctx.tr("panel.stop", &[]),
+            tr(ctx, "panel.stop", &[]),
             &format!("stop:{}", timer.id),
         ),
     ]
@@ -397,15 +398,19 @@ fn action_button(
 
 fn title(ctx: &Context, timer: &Timer) -> String {
     timer.message.clone().unwrap_or_else(|| {
-        ctx.tr("panel.timer", &[("duration", timer.label.clone())])
+        tr(ctx, "panel.timer", &[("duration", timer.label.clone())])
     })
 }
 
 fn subtitle(ctx: &Context, timer: &Timer, clock: &Clock) -> String {
     if timer.paused {
-        return ctx.tr("panel.paused_left", &[]);
+        return tr(ctx, "panel.paused_left", &[]);
     }
-    ctx.tr("panel.ends_at", &[("time", timer.ends_at_text(ctx, clock))])
+    tr(
+        ctx,
+        "panel.ends_at",
+        &[("time", timer.ends_at_text(ctx, clock))],
+    )
 }
 
 fn controls_row(ctx: &Context, panel: &Panel) -> ui::UiNode {
@@ -416,7 +421,7 @@ fn controls_row(ctx: &Context, panel: &Panel) -> ui::UiNode {
                 Props::new()
                     .text("key", format!("new-{}", panel.input_key))
                     .text("value", panel.new_text.clone())
-                    .text("placeholder", ctx.tr("panel.placeholder", &[]))
+                    .text("placeholder", tr(ctx, "panel.placeholder", &[]))
                     .int("flexGrow", 1)
                     .bool("focus", true)
                     .call("onChange", "draft")
@@ -424,7 +429,7 @@ fn controls_row(ctx: &Context, panel: &Panel) -> ui::UiNode {
             ),
             ui::button(
                 Props::new()
-                    .text("text", ctx.tr("panel.start", &[]))
+                    .text("text", tr(ctx, "panel.start", &[]))
                     .text("variant", "primary")
                     .call("onClick", "start"),
             ),
@@ -479,7 +484,7 @@ fn argument(ctx: &Context, index: usize) -> String {
 
 fn start(ctx: &Context, panel: &mut Panel, text: &str) -> Vec<Op> {
     let Some((seconds, message)) = duration::split(text) else {
-        panel.error = Some(ctx.tr("panel.invalid", &[]));
+        panel.error = Some(tr(ctx, "panel.invalid", &[]));
         return render(ctx, panel);
     };
 

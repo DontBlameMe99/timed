@@ -14,6 +14,7 @@ use serde_json::{Value, json};
 
 use crate::duration;
 use crate::file;
+use crate::i18n::tr;
 use crate::sync::lock;
 use crate::timer::{self, Timer};
 use crate::urgency::{self, Colors, State};
@@ -565,7 +566,7 @@ fn tooltip(
 ) -> Option<Value> {
     let Tooltip { timers, now } = *source;
     if timers.is_empty() {
-        let empty = ctx.tr("bar.empty", &[]);
+        let empty = tr(ctx, "bar.empty", &[]);
         if widget.tooltip.as_deref() == Some(empty.as_str()) {
             return None;
         }
@@ -580,7 +581,7 @@ fn tooltip(
         }
         let value = if timer.paused {
             let left = duration::approx(timer.remaining_seconds(now));
-            ctx.tr("bar.paused", &[("time", left)])
+            tr(ctx, "bar.paused", &[("time", left)])
         } else {
             duration::approx(timer.remaining_seconds(now))
         };
@@ -596,10 +597,10 @@ fn tooltip(
         .map(|timer| {
             let left = duration::approx(timer.remaining_seconds(now));
             let title = timer.message.clone().unwrap_or_else(|| {
-                ctx.tr("bar.timer", &[("duration", timer.label.clone())])
+                tr(ctx, "bar.timer", &[("duration", timer.label.clone())])
             });
             let value = if timer.paused {
-                ctx.tr("bar.paused", &[("time", left)])
+                tr(ctx, "bar.paused", &[("time", left)])
             } else {
                 left
             };

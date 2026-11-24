@@ -1,6 +1,7 @@
 pub mod duration;
 mod emit;
 mod file;
+mod i18n;
 pub mod launcher;
 mod math;
 pub mod panel;

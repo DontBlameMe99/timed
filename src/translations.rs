@@ -67,7 +67,7 @@ pub const TRANSLATIONS: &[(&str, &str)] = &[
     ("panel.resume", "Resume"),
     ("panel.stop", "Stop"),
     ("panel.stop_all", "Stop all"),
-    ("panel.placeholder", "Duration, e.g. 1h5 or 5"),
+    ("panel.placeholder", "Duration - e.g. 5m or 1h5"),
     ("panel.start", "Start"),
     ("panel.invalid", "Invalid duration"),
     ("launcher.hint", "Try 1h5, 1y, 4s10h3m, or 5 for 5 minutes"),

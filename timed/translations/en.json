@@ -31,7 +31,7 @@
     "invalid": "Invalid duration",
     "pause": "Pause",
     "paused_left": "Paused",
-    "placeholder": "Duration, e.g. 1h5 or 5",
+    "placeholder": "Duration - e.g. 5m or 1h5",
     "resume": "Resume",
     "start": "Start",
     "stop": "Stop",

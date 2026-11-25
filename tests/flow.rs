@@ -464,6 +464,7 @@ fn panel_renders_the_published_list() {
         .expect("panel render");
     let text = tree["tree"].to_string();
     assert!(text.contains("focus"), "{text}");
+    assert!(text.contains("Duration - e.g. 5m or 1h5"), "{text}");
     assert!(text.contains("Ends at"), "{text}");
 
     drop(helper);

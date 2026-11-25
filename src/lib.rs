@@ -1,8 +1,3 @@
-#![expect(
-    clippy::manual_string_new,
-    reason = "codegen writes an empty launcher prefix"
-)]
-
 pub mod duration;
 mod emit;
 mod file;

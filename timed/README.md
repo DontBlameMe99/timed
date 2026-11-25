@@ -12,7 +12,7 @@ was for.
 | --- | --- |
 | ID | `dontblameme/timed` |
 | Entries | Bar widget: `timed_indicator`; launcher providers: `launcher`, `launcher_global`; panel: `panel`; service: `service` |
-| Launcher Prefix | `/timer` |
+| Launcher Prefix | `/timer`, `/always` (global search when enabled) |
 
 ## Requirements
 

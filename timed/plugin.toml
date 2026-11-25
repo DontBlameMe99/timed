@@ -196,7 +196,7 @@ include_in_global_search = false
 [[launcher_provider]]
 id = "launcher_global"
 entry = "launcher_global.luau"
-prefix = ""
+prefix = "always"
 glyph = "clock"
 include_in_global_search = true
 

@@ -151,6 +151,9 @@ fn config(entry: &str) -> Value {
             "idle_color": "primary",
         });
     }
+    if entry == "launcher_global" {
+        return json!({ "always_available": true });
+    }
     json!({})
 }
 
@@ -590,6 +593,42 @@ fn launcher_queries_and_starts_timers() {
     assert_eq!(command["value"]["action"], json!("start"));
     assert_eq!(command["value"]["seconds"], json!(3900));
     assert_eq!(command["value"]["message"], json!("wake up"));
+
+    drop(helper);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn global_launcher_starts_a_timer_without_the_prefix() {
+    let root = scratch("ui-launcher-global");
+    let mut helper = Helper::start(&root);
+
+    let ops = helper.state(fixture(), json!(null)).call(
+        "launcher_global",
+        "query",
+        json!({ "text": "2h5m test" }),
+    );
+    let results = ops
+        .iter()
+        .find(|op| op["op"] == json!("launcher_results"))
+        .expect("results");
+    assert_eq!(results["text"], json!("2h5m test"));
+    assert_eq!(results["rows"][0]["id"], json!("start:7500:test"));
+
+    let ops = helper.state(fixture(), json!(null)).call(
+        "launcher_global",
+        "activate",
+        json!({ "id": "start:7500:test" }),
+    );
+    let command = ops
+        .iter()
+        .find(|op| {
+            op["op"] == json!("state_set")
+                && op["key"] == json!("timed.command")
+        })
+        .expect("command");
+    assert_eq!(command["value"]["seconds"], json!(7500));
+    assert_eq!(command["value"]["message"], json!("test"));
 
     drop(helper);
     let _ = fs::remove_dir_all(root);

@@ -1,7 +1,7 @@
 --!nonstrict
 
 local bridge = require("./lib/bridge.luau")
-bridge.setup("timed_indicator", { "show_text", "show_count", "show_progress", "hide_when_idle", "use_urgency_colors", "safe_color", "warning_color", "urgent_color", "idle_color" })
+bridge.setup("timed_indicator", { "always_available", "show_text", "show_count", "show_progress", "hide_when_idle", "use_urgency_colors", "safe_color", "warning_color", "urgent_color", "idle_color" })
 
 function onClick() bridge.call("click") end
 function onRightClick() bridge.call("right_click") end

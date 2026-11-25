@@ -19,6 +19,7 @@ use std::process::ExitCode;
 
 use noctalia_rs::Plugin;
 
+use self::launcher::global as launcher_global;
 use self::launcher::update as launcher;
 use self::panel::update as panel;
 use self::service::update as service;

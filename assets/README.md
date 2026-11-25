@@ -11,8 +11,8 @@ was for.
 | Field | Value |
 | --- | --- |
 | ID | `dontblameme/timed` |
-| Entries | Bar widget: `timed_indicator`; launcher provider: `launcher`; panel: `panel`; service: `service` |
-| Launcher Prefix | `/timer` |
+| Entries | Bar widget: `timed_indicator`; launcher providers: `launcher`, `launcher_global`; panel: `panel`; service: `service` |
+| Launcher Prefix | `/timer`, `/always` (global search when enabled) |
 
 ## Requirements
 
@@ -48,6 +48,12 @@ noctalia msg panel-toggle dontblameme/timed:panel
 
 ## Settings
 
+One plugin setting is shared by every entry:
+
+| Setting | What it does |
+| --- | --- |
+| Always available in launcher | Show timer suggestions in unprefixed launcher search, so `2h5m test` works without `/timer`. |
+
 The bar widget has these per-instance settings:
 
 | Setting | What it does |
@@ -64,7 +70,9 @@ The bar widget has these per-instance settings:
 
 ## Usage
 
-Open the launcher and type `/timer` followed by a duration.
+Open the launcher and type `/timer` followed by a duration. With **Always
+available in launcher** enabled in Settings → Plugins → Timed, type the duration
+directly, such as `2h5m test`.
 
 | Launcher input | Result |
 | --- | --- |

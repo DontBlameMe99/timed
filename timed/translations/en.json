@@ -40,6 +40,10 @@
     "title": "Timed"
   },
   "settings": {
+    "always_available": {
+      "description": "Show timer suggestions in unprefixed launcher search, so 2h5m works without /timer.",
+      "label": "Always available in launcher"
+    },
     "color": {
       "error": "Error",
       "on_surface": "Text",

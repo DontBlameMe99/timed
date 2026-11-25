@@ -9,6 +9,13 @@ tags = ["launcher", "bar", "panel", "service", "countdown", "time", "utility"]
 icon = "clock"
 description = "Start, pause, resume, and stop countdown timers from the bar or launcher."
 
+[[setting]]
+key = "always_available"
+type = "bool"
+label_key = "settings.always_available.label"
+description_key = "settings.always_available.description"
+default = false
+
 [[service]]
 id = "service"
 entry = "service.luau"
@@ -21,6 +28,13 @@ handler = "launcher"
 prefix = "timer"
 glyph = "clock"
 include_in_global_search = false
+[[launcher_provider]]
+id = "launcher_global"
+entry = "launcher_global.luau"
+handler = "launcher_global"
+prefix = "always"
+glyph = "clock"
+include_in_global_search = true
 
 [[widget]]
 id = "timed_indicator"

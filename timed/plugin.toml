@@ -9,6 +9,14 @@ tags = ["launcher", "bar", "panel", "service", "countdown", "time", "utility"]
 icon = "clock"
 dependencies = []
 
+
+  [[setting]]
+key = "always_available"
+label_key = "settings.always_available.label"
+description_key = "settings.always_available.description"
+type = "bool"
+default = false
+
 [[service]]
 id = "service"
 entry = "service.luau"
@@ -184,6 +192,13 @@ entry = "launcher.luau"
 prefix = "timer"
 glyph = "clock"
 include_in_global_search = false
+
+[[launcher_provider]]
+id = "launcher_global"
+entry = "launcher_global.luau"
+prefix = "always"
+glyph = "clock"
+include_in_global_search = true
 
 [[panel]]
 id = "panel"

@@ -12,6 +12,14 @@ pub const TRANSLATIONS: &[(&str, &str)] = &[
         "settings.show_text.description",
         "Show the estimated remaining time next to the ring.",
     ),
+    (
+        "settings.always_available.label",
+        "Always available in launcher",
+    ),
+    (
+        "settings.always_available.description",
+        "Show timer suggestions in unprefixed launcher search, so 2h5m works without /timer.",
+    ),
     ("settings.show_count.label", "Show count"),
     (
         "settings.show_count.description",

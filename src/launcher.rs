@@ -49,6 +49,7 @@ impl Launcher {
 
 static LAUNCHER: Mutex<Launcher> = Mutex::new(Launcher::new());
 
+static GLOBAL: Mutex<bool> = Mutex::new(false);
 /// Handles one launcher event.
 ///
 /// # Errors
@@ -73,6 +74,45 @@ pub fn update(ctx: &Context) -> Result<Vec<Op>> {
             // The original clears its query after sending a command so the
             // following state change does not redraw stale rows.
             lock(&LAUNCHER).suppressed = !ops.is_empty();
+            Ok(ops)
+        }
+        _ => Ok(Vec::new()),
+    }
+}
+/// Handles one unprefixed launcher query when Timed is set to be always
+/// available.
+///
+/// # Errors
+/// The signature matches the entry contract; this handler does not fail.
+pub fn global(ctx: &Context) -> Result<Vec<Op>> {
+    match ctx.event.as_str() {
+        "query" => {
+            let text = ctx.payload_str("text").unwrap_or_default();
+            let source = ctx.payload_str("source").unwrap_or_default();
+            let mut suppressed = lock(&GLOBAL);
+            let skip = source == "state" && *suppressed;
+            *suppressed = false;
+            drop(suppressed);
+            if skip || !ctx.config_bool("always_available", false) {
+                return Ok(vec![Op::LauncherResults {
+                    text,
+                    rows: Vec::new(),
+                }]);
+            }
+            let query = text.trim_ascii();
+            if duration::split(query).is_none() {
+                return Ok(vec![Op::LauncherResults {
+                    text,
+                    rows: Vec::new(),
+                }]);
+            }
+            let rows = vec![start_row(ctx, query)];
+            Ok(vec![Op::LauncherResults { text, rows }])
+        }
+        "activate" => {
+            let id = ctx.payload_str("id").unwrap_or_default();
+            let ops = activate(ctx, &id);
+            *lock(&GLOBAL) = !ops.is_empty();
             Ok(ops)
         }
         _ => Ok(Vec::new()),
@@ -319,6 +359,37 @@ mod tests {
             test_context::context("query", json!({}), json!({}), json!({}));
         let row = start_row(&ctx, "nope");
         assert_eq!(row["id"], json!("invalid"));
+    }
+
+    #[test]
+    fn global_handler_only_answers_when_available() {
+        let mut ctx = test_context::context(
+            "query",
+            json!({ "always_available": true }),
+            json!({}),
+            json!({}),
+        );
+        ctx.payload = json!({ "text": "2h5m test" });
+        let ops = global(&ctx).expect("ops");
+        let Op::LauncherResults { rows, .. } = &ops[0] else {
+            panic!("expected launcher results");
+        };
+        assert_eq!(rows[0]["id"], json!("start:7500:test"));
+
+        ctx.config = json!({ "always_available": false });
+        let ops = global(&ctx).expect("ops");
+        let Op::LauncherResults { rows, .. } = &ops[0] else {
+            panic!("expected launcher results");
+        };
+        assert_eq!(rows.as_slice(), &[] as &[Value]);
+
+        ctx.config = json!({ "always_available": true });
+        ctx.payload = json!({ "text": "test" });
+        let ops = global(&ctx).expect("ops");
+        let Op::LauncherResults { rows, .. } = &ops[0] else {
+            panic!("expected launcher results");
+        };
+        assert_eq!(rows.as_slice(), &[] as &[Value]);
     }
 
     #[test]

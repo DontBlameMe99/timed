@@ -1,7 +1,7 @@
 --!nonstrict
 
 local bridge = require("./lib/bridge.luau")
-bridge.setup("launcher", {  })
+bridge.setup("launcher", { "always_available" })
 
 function onClick() bridge.call("click") end
 function onRightClick() bridge.call("right_click") end

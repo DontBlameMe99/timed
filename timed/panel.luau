@@ -1,7 +1,7 @@
 --!nonstrict
 
 local bridge = require("./lib/bridge.luau")
-bridge.setup("panel", {  })
+bridge.setup("panel", { "always_available" })
 
 function onClick() bridge.call("click") end
 function onRightClick() bridge.call("right_click") end

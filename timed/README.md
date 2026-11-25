@@ -31,8 +31,9 @@ The ring uses the theme color. With timer colors enabled, it switches from the
 safe color to the warning and urgent colors based on how much of the timer is
 left. The widget settings can hide the time, count, or ring, turn timer colors
 off, choose the safe, warning, urgent, and idle theme colors, and hide the
-widget when no timers are running. The time is a coarse estimate, such as 4h,
-30m, or 1m, and never drops below 1m.
+widget when no timers are running. The time shows the two largest units it
+needs, such as 1h 5m, 1d 3h, 1w 3d, 1mo 2w, or 1y 3mo, and never drops below
+1m.
 
 The panel lists every timer with pause or resume and stop buttons. It also has
 an input to start a new timer.

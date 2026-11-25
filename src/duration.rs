@@ -11,6 +11,8 @@ use crate::math::{quotient, remainder};
 const MINUTE: i64 = 60;
 const HOUR: i64 = 60 * MINUTE;
 pub const DAY: i64 = 24 * HOUR;
+const WEEK: i64 = 7 * DAY;
+const MONTH: i64 = 30 * DAY;
 const YEAR: i64 = 365 * DAY;
 const MAX_SECONDS: i64 = 100 * YEAR;
 
@@ -300,6 +302,147 @@ fn coarse_token(coarse: Coarse) -> u64 {
     }
 }
 
+/// The bar time rounded into the two largest units it needs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Detailed {
+    Minutes(i64),
+    Hours(i64, i64),
+    Days(i64, i64),
+    Weeks(i64, i64),
+    Months(i64, i64),
+    Years(i64, i64),
+}
+
+impl Detailed {
+    fn of(seconds: i64) -> Self {
+        let total = seconds.max(0);
+        Self::from_units(
+            rounded(total, MINUTE),
+            rounded(total, HOUR),
+            rounded(total, DAY),
+        )
+    }
+
+    fn of_ms(milliseconds: i64) -> Self {
+        let total = milliseconds.max(0);
+        Self::from_units(
+            rounded_ms(total, MINUTE),
+            rounded_ms(total, HOUR),
+            rounded_ms(total, DAY),
+        )
+    }
+
+    fn from_units(minutes: i64, hours: i64, days: i64) -> Self {
+        if days >= quotient(YEAR, DAY) {
+            let years = quotient(days, quotient(YEAR, DAY));
+            let months = quotient(
+                remainder(days, quotient(YEAR, DAY)),
+                quotient(MONTH, DAY),
+            );
+            return Self::Years(years, months);
+        }
+        if days >= quotient(MONTH, DAY) {
+            let months = quotient(days, quotient(MONTH, DAY));
+            let weeks = quotient(
+                remainder(days, quotient(MONTH, DAY)),
+                quotient(WEEK, DAY),
+            );
+            return Self::Months(months, weeks);
+        }
+        if days >= quotient(WEEK, DAY) {
+            return Self::Weeks(
+                quotient(days, quotient(WEEK, DAY)),
+                remainder(days, quotient(WEEK, DAY)),
+            );
+        }
+        if hours >= 24 {
+            return Self::Days(quotient(hours, 24), remainder(hours, 24));
+        }
+        let rounded_minutes = minutes.max(1);
+        if rounded_minutes >= 60 {
+            return Self::Hours(
+                quotient(rounded_minutes, MINUTE),
+                remainder(rounded_minutes, MINUTE),
+            );
+        }
+        Self::Minutes(rounded_minutes)
+    }
+}
+
+/// Bar form with the next smaller unit, such as 1h 5m or 1d 3h.
+#[must_use]
+pub fn approx_detailed(seconds: i64) -> String {
+    detailed_text(Detailed::of(seconds))
+}
+
+fn detailed_text(time: Detailed) -> String {
+    match time {
+        Detailed::Minutes(value) => format!("{value}m"),
+        Detailed::Hours(hours, minutes) => {
+            if minutes > 0 {
+                format!("{hours}h {minutes}m")
+            } else {
+                format!("{hours}h")
+            }
+        }
+        Detailed::Days(days, hours) => {
+            if hours > 0 {
+                format!("{days}d {hours}h")
+            } else {
+                format!("{days}d")
+            }
+        }
+        Detailed::Weeks(weeks, days) => {
+            if days > 0 {
+                format!("{weeks}w {days}d")
+            } else {
+                format!("{weeks}w")
+            }
+        }
+        Detailed::Months(months, weeks) => {
+            if weeks > 0 {
+                format!("{months}mo {weeks}w")
+            } else {
+                format!("{months}mo")
+            }
+        }
+        Detailed::Years(years, months) => {
+            if months > 0 {
+                format!("{years}y {months}mo")
+            } else {
+                format!("{years}y")
+            }
+        }
+    }
+}
+
+/// Allocation-free identity of `approx_detailed` for milliseconds.
+#[must_use]
+pub fn approx_detailed_token_ms(milliseconds: i64) -> u64 {
+    detailed_token(Detailed::of_ms(milliseconds))
+}
+
+fn detailed_token(time: Detailed) -> u64 {
+    match time {
+        Detailed::Minutes(value) => 6_000_000_u64.saturating_add(as_u64(value)),
+        Detailed::Hours(hours, minutes) => 4_000_000_u64
+            .saturating_add(as_u64(hours).saturating_mul(60))
+            .saturating_add(as_u64(minutes)),
+        Detailed::Days(days, hours) => 3_000_000_u64
+            .saturating_add(as_u64(days).saturating_mul(24))
+            .saturating_add(as_u64(hours)),
+        Detailed::Weeks(weeks, days) => 2_400_000_u64
+            .saturating_add(as_u64(weeks).saturating_mul(7))
+            .saturating_add(as_u64(days)),
+        Detailed::Months(months, weeks) => 2_200_000_u64
+            .saturating_add(as_u64(months).saturating_mul(100))
+            .saturating_add(as_u64(weeks)),
+        Detailed::Years(years, months) => 1_000_000_u64
+            .saturating_add(as_u64(years).saturating_mul(100))
+            .saturating_add(as_u64(months)),
+    }
+}
+
 fn as_u64(value: i64) -> u64 {
     u64::try_from(value).unwrap_or(0)
 }
@@ -373,6 +516,43 @@ mod tests {
         assert_eq!(approx(86_399), "1d");
         assert_eq!(approx(90_000), "1d");
         assert_eq!(approx(400 * DAY), "1y");
+    }
+
+    #[test]
+    fn approx_detailed_shows_two_largest_units() {
+        assert_eq!(approx(3_900), "1h");
+        assert_eq!(approx(5_400), "2h");
+        assert_eq!(approx(36 * HOUR), "2d");
+        assert_eq!(approx(364 * DAY + 12 * HOUR), "1y");
+        assert_eq!(approx_token_ms(5_400_000), 4_000_002);
+
+        assert_eq!(approx_detailed(3_900), "1h 5m");
+        assert_eq!(approx_detailed(84_600), "1d");
+        assert_eq!(approx_detailed(DAY + 3 * HOUR + 2 * MINUTE), "1d 3h");
+        assert_eq!(approx_detailed(WEEK + 3 * DAY), "1w 3d");
+        assert_eq!(approx_detailed(MONTH + 2 * WEEK), "1mo 2w");
+        assert_eq!(approx_detailed(YEAR + 8 * MONTH), "1y 8mo");
+
+        assert_ne!(
+            approx_detailed_token_ms(3_900_000),
+            approx_detailed_token_ms(5_400_000)
+        );
+        assert_ne!(
+            approx_detailed_token_ms((DAY + 3 * HOUR) * 1_000),
+            approx_detailed_token_ms((DAY + 4 * HOUR) * 1_000)
+        );
+        assert_ne!(
+            approx_detailed_token_ms(WEEK * 1_000),
+            approx_detailed_token_ms((WEEK + DAY) * 1_000)
+        );
+        assert_ne!(
+            approx_detailed_token_ms(MONTH * 1_000),
+            approx_detailed_token_ms((MONTH + WEEK) * 1_000)
+        );
+        assert_ne!(
+            approx_detailed_token_ms(YEAR * 1_000),
+            approx_detailed_token_ms((YEAR + MONTH) * 1_000)
+        );
     }
 
     #[test]

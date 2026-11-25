@@ -122,7 +122,8 @@ fn memo_hit(ctx: &Context, panel: &mut Panel, view: &View<'_>) -> bool {
             u64::from(timer.fraction_step_ms(remaining, PANEL_STEPS))
                 | ((state | (long << 2)) << 16),
         );
-        memo.scratch.push(duration::approx_token_ms(remaining));
+        memo.scratch
+            .push(duration::approx_detailed_token_ms(remaining));
     }
 
     if memo.valid && memo.scratch == memo.tokens {
@@ -196,7 +197,7 @@ fn collect_rows<'a>(timers: &'a [Timer], view: &View<'_>) -> Vec<Row<'a>> {
                 timer,
                 state,
                 step: timer.fraction_step_ms(remaining, PANEL_STEPS),
-                time: duration::approx(timer.remaining_seconds(now)),
+                time: duration::approx_detailed(timer.remaining_seconds(now)),
                 role: state.role(view.colors),
             }
         })
@@ -622,7 +623,7 @@ mod tests {
     }
 
     #[test]
-    fn memo_wakes_when_the_rounded_countdown_changes() {
+    fn memo_wakes_when_the_displayed_minute_changes() {
         let now: i64 = 1_800_000_000_000;
         urgency::store_colors(Some(&json!({ "useUrgency": true })));
         let state = json!({ "timers": [{
@@ -654,17 +655,17 @@ mod tests {
             serde_json::to_value(op)
                 .expect("op")
                 .to_string()
-                .contains("14h")
+                .contains("13h 30m")
         }));
 
         let mut later = test_context::context("render", json!({}), state, host);
-        later.now_ms = now.saturating_add(20_000);
+        later.now_ms = now.saturating_add(60_000);
         let ops = render(&later, &mut panel);
         assert!(ops.iter().any(|op| {
             serde_json::to_value(op)
                 .expect("op")
                 .to_string()
-                .contains("13h")
+                .contains("13h 29m")
         }));
     }
 }

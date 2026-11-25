@@ -143,7 +143,7 @@ fn memo_hit(ctx: &Context, widget: &mut Widget) -> bool {
     memo.scratch.clear();
     for timer in &memo.timers {
         memo.scratch
-            .push(duration::approx_token_ms(timer.remaining_ms(now)));
+            .push(duration::approx_detailed_token_ms(timer.remaining_ms(now)));
         memo.scratch.push(u64::from(timer.paused));
     }
     if let Some(nearest) = memo.timers.first() {
@@ -334,7 +334,7 @@ fn label(config: &Config, spec: &Label<'_>) -> BarLabel {
     else {
         return BarLabel::plain();
     };
-    let text = duration::approx(timer.remaining_seconds(spec.now));
+    let text = duration::approx_detailed(timer.remaining_seconds(spec.now));
     let color = State::of(timer, spec.now)
         .text_role(&config.colors)
         .unwrap_or_else(|| "on_surface".to_owned());
@@ -394,8 +394,10 @@ fn fallback_tree(spec: &Fallback<'_>) -> Vec<Op> {
         && config.show_text
         && !vertical
     {
-        let mut label = Props::new()
-            .text("text", duration::approx(timer.remaining_seconds(now)));
+        let mut label = Props::new().text(
+            "text",
+            duration::approx_detailed(timer.remaining_seconds(now)),
+        );
         if let Some(role) = State::of(timer, now).text_role(&config.colors) {
             label = label.text("color", role);
         }
@@ -592,10 +594,10 @@ fn tooltip(
             keys.push('|');
         }
         let value = if timer.paused {
-            let left = duration::approx(timer.remaining_seconds(now));
+            let left = duration::approx_detailed(timer.remaining_seconds(now));
             tr(ctx, "bar.paused", &[("time", left)])
         } else {
-            duration::approx(timer.remaining_seconds(now))
+            duration::approx_detailed(timer.remaining_seconds(now))
         };
         let _ = write!(keys, "{}={value}", timer.id);
     }
@@ -607,7 +609,7 @@ fn tooltip(
     let rows = timers
         .iter()
         .map(|timer| {
-            let left = duration::approx(timer.remaining_seconds(now));
+            let left = duration::approx_detailed(timer.remaining_seconds(now));
             let title = timer.message.clone().unwrap_or_else(|| {
                 tr(ctx, "bar.timer", &[("duration", timer.label.clone())])
             });

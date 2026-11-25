@@ -442,6 +442,60 @@ fn widget_renders_the_published_list() {
 }
 
 #[test]
+fn widget_shows_minutes_in_bar_tooltip_and_panel() {
+    let root = scratch("ui-widget-minutes");
+    let mut helper = Helper::start(&root);
+    let state = json!({
+        "timers": [{
+            "id": "one",
+            "seconds": 3_900,
+            "label": "60m",
+            "message": "tea",
+            "paused": false,
+            "endsAt": NOW + 3_900_000,
+        }]
+    });
+
+    let ops = helper.state(state.clone(), json!(null)).call(
+        "timed_indicator",
+        "render",
+        json!({ "source": "load" }),
+    );
+    assert!(
+        ops.iter()
+            .any(|op| op["op"] == json!("bar_text")
+                && op["text"] == json!("1h 5m")),
+        "{ops:?}"
+    );
+    assert!(
+        ops.iter().any(|op| op["op"] == json!("bar_tooltip")
+            && op["value"][0]["value"] == json!("1h 5m")),
+        "{ops:?}"
+    );
+
+    let colors = json!({
+        "safe": "tertiary",
+        "warning": "secondary",
+        "urgent": "error",
+        "idle": "primary",
+        "useUrgency": true
+    });
+    let ops = helper.state(state, colors).call(
+        "panel",
+        "open",
+        json!({ "context": null }),
+    );
+    let tree = ops
+        .iter()
+        .find(|op| op["op"] == json!("panel_render"))
+        .expect("panel render");
+    assert!(tree["tree"].to_string().contains("\"text\":\"1h 5m\""));
+
+    drop(helper);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn panel_renders_the_published_list() {
     let root = scratch("ui-panel");
     let mut helper = Helper::start(&root);

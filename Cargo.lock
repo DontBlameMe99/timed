@@ -227,9 +227,9 @@ dependencies = [
 
 [[package]]
 name = "noctalia-rs"
-version = "0.2.1"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4a804ee2f2c62fbc0754a212bad465eddfb2f757df3c56f4c47f71ca551cf467"
+checksum = "1f9c6516e60b8267845bece17191fe22c375b496adc6e6412e1f3cd744cf0893"
 dependencies = [
  "chrono",
  "noctalia-rs-macros",
@@ -241,18 +241,30 @@ dependencies = [
 
 [[package]]
 name = "noctalia-rs-build"
-version = "0.2.1"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6bc18673ec64e95808ac361de37980fa0e5e5aa29ba6639cd2d0a7178114f34f"
+checksum = "a40e3a26ffcb8797d3c182a32ff01ade07ccce22fb902b9495b6f377d7152ec6"
 dependencies = [
+ "noctalia-rs-compiler",
+ "syn 3.0.10",
  "toml",
 ]
 
 [[package]]
-name = "noctalia-rs-macros"
-version = "0.2.1"
+name = "noctalia-rs-compiler"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "26e7d1005f9b8144e48226a19ee898d5205a09c0f4ef9fba44c027241edcc519"
+checksum = "97823b5db6ea518a1de70b06ad0451477d4783d98aabac358fb3486cb929167a"
+dependencies = [
+ "proc-macro2",
+ "syn 3.0.10",
+]
+
+[[package]]
+name = "noctalia-rs-macros"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5bd32a023469b9f65723a4b22eb9adb8f8e7de46a137e0a9516e61012215771e"
 dependencies = [
  "proc-macro2",
  "quote",

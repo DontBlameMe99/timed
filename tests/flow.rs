@@ -36,14 +36,16 @@ struct Helper {
 )]
 impl Helper {
     fn start(root: &Path) -> Self {
-        let data = root.join("data");
-        let spool = root.join("spool");
-        fs::create_dir_all(&data).expect("data dir");
-        fs::create_dir_all(&spool).expect("spool dir");
+        Self::start_with_dirs(&root.join("data"), &root.join("spool"))
+    }
+
+    fn start_with_dirs(data: &Path, spool: &Path) -> Self {
+        fs::create_dir_all(data).expect("data dir");
+        fs::create_dir_all(spool).expect("spool dir");
         let mut child = Command::new(env!("CARGO_BIN_EXE_timed"))
             .arg("serve")
-            .arg(&data)
-            .arg(&spool)
+            .arg(data)
+            .arg(spool)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .spawn()
@@ -441,6 +443,48 @@ fn widget_renders_the_published_list() {
     assert!(Path::new(&image).exists(), "{image}");
 
     drop(helper);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn ring_files_do_not_collide_between_bar_processes() {
+    let root = scratch("ring-unique");
+    let data = root.join("data");
+    let mut first = Helper::start_with_dirs(&data, &root.join("spool-a"));
+    let mut second = Helper::start_with_dirs(&data, &root.join("spool-b"));
+    let list = json!({ "timers": [{
+        "id": "one",
+        "seconds": 600,
+        "label": "10m",
+        "paused": false,
+        "endsAt": NOW + 600_000
+    }] });
+
+    let paths: Vec<String> = [&mut first, &mut second]
+        .into_iter()
+        .map(|helper| {
+            helper.host["bar"]["output_name"] = Value::Null;
+            let ops = helper.state(list.clone(), json!(null)).call(
+                "timed_indicator",
+                "render",
+                json!({ "source": "load" }),
+            );
+            ops.iter()
+                .find(|op| op["op"] == json!("bar_image"))
+                .and_then(|op| op["path"].as_str())
+                .expect("ring path")
+                .to_owned()
+        })
+        .collect();
+
+    let [first_path, second_path]: [String; 2] =
+        paths.try_into().expect("two ring paths");
+    assert_ne!(first_path, second_path, "two helpers used one ring file");
+    assert!(Path::new(&first_path).exists(), "{first_path}");
+    assert!(Path::new(&second_path).exists(), "{second_path}");
+
+    drop(first);
+    drop(second);
     let _ = fs::remove_dir_all(root);
 }
 

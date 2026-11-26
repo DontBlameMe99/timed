@@ -7,6 +7,7 @@ use std::fmt::Write;
 use std::fs;
 use std::mem;
 use std::path::{Path, PathBuf};
+use std::process;
 use std::sync::Mutex;
 
 use noctalia_rs::{Context, Op, Props, Result, ui};
@@ -536,9 +537,13 @@ fn write_ring_file(ctx: &Context, widget: &mut Widget, svg: &str) -> bool {
 /// always points at the same file.
 fn ring_path<'a>(ctx: &Context, widget: &'a mut Widget) -> Option<&'a Path> {
     if widget.path.is_none() {
+        // Each bar runs its helper with the same data directory. When the
+        // output name is unavailable at load, a clock alone can name the
+        // same file for two processes starting in the same millisecond.
         let name = format!(
-            "{}-{}",
+            "{}-{}-{}",
             ctx.bar_output_name().unwrap_or("bar"),
+            process::id(),
             ctx.now_ms
         );
         widget.path =

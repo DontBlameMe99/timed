@@ -1,6 +1,6 @@
 id = "dontblameme/timed"
 name = "Timed"
-version = "1.4.2"
+version = "1.4.3"
 plugin_api = 48
 author = "DontBlameMe"
 license = "GPL-3.0-or-later"

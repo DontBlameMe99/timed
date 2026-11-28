@@ -69,23 +69,27 @@ pub fn update(ctx: &Context) -> Result<Vec<Op>> {
     }
     // A command or IPC event can arrive after an end time but before the tick.
     // Expire first so no branch sees a timer that is already finished.
-    if expire(ctx, &mut service, &mut ops) {
-        commit(ctx, &mut service, &mut ops);
-    }
+    let expired = expire(ctx, &mut service, &mut ops);
+    let mut changed = false;
 
     match ctx.event.as_str() {
         "update" | "resume" => {
-            schedule(ctx, &mut service, &mut ops);
+            if !expired {
+                schedule(ctx, &mut service, &mut ops);
+            }
         }
-        "ipc" => ipc(ctx, &mut service, &mut ops),
+        "ipc" => changed = ipc(ctx, &mut service, &mut ops),
         "host_callback" => {
             if ctx.payload_str("id").as_deref() == Some("command")
                 && let Some(command) = ctx.payload_arg(0)
             {
-                handle_command(ctx, &mut service, command, &mut ops);
+                changed = handle_command(ctx, &mut service, command, &mut ops);
             }
         }
         _ => {}
+    }
+    if expired || changed {
+        commit(ctx, &mut service, &mut ops);
     }
 
     Ok(ops)
@@ -94,15 +98,16 @@ pub fn update(ctx: &Context) -> Result<Vec<Op>> {
 fn start(ctx: &Context, service: &mut Service, ops: &mut Vec<Op>) {
     service.loaded = true;
     service.last_command = ctx
-        .global_state(LAST_COMMAND_KEY)
-        .and_then(|value| value.as_i64())
+        .host
+        .get("timed_last_command")
+        .and_then(Value::as_i64)
         .unwrap_or(0);
     load(ctx, service, ops);
     sort(&mut service.timers);
     ops.push(Op::state_watch(COMMAND_KEY, "command"));
 
-    if let Some(command) = ctx.global_state(COMMAND_KEY) {
-        handle_command(ctx, service, &command, ops);
+    if let Some(command) = ctx.host.get("timed_command") {
+        handle_command(ctx, service, command, ops);
     }
     seed_sequence(service.last_command);
     expire(ctx, service, ops);
@@ -361,16 +366,16 @@ fn handle_command(
     service: &mut Service,
     command: &Value,
     ops: &mut Vec<Op>,
-) {
+) -> bool {
     let Some(sequence) = command.get("n").and_then(Value::as_i64) else {
-        return;
+        return false;
     };
     if sequence <= service.last_command {
-        return;
+        return false;
     }
     service.last_command = sequence;
     ops.push(Op::state(LAST_COMMAND_KEY, Value::from(sequence)));
-    apply(ctx, service, command, ops);
+    apply(ctx, service, command, ops)
 }
 
 #[expect(
@@ -382,9 +387,9 @@ fn apply(
     service: &mut Service,
     command: &Value,
     ops: &mut Vec<Op>,
-) {
+) -> bool {
     let Some(action) = command.get("action").and_then(Value::as_str) else {
-        return;
+        return false;
     };
     let target = command_id(command);
     let id = target.as_deref();
@@ -427,53 +432,53 @@ fn apply(
         _ => {}
     }
 
-    if changed {
-        commit(ctx, service, ops);
-    }
+    changed
 }
 
 const fn state_name(timer: &Timer) -> &'static str {
     if timer.paused { "paused" } else { "running" }
 }
 
-fn ipc(ctx: &Context, service: &mut Service, ops: &mut Vec<Op>) {
+fn ipc(ctx: &Context, service: &mut Service, ops: &mut Vec<Op>) -> bool {
     let event = ctx.payload_str("event").unwrap_or_default();
     let payload = ctx.payload_str("payload").unwrap_or_default();
 
     match event.as_str() {
         "start" => {
             let Some((seconds, message)) = duration::split(&payload) else {
-                return;
+                return false;
             };
             service.ipc_seq = service.ipc_seq.saturating_add(1);
             let id = format!("{}-{}", ctx.now_ms, service.ipc_seq);
-            if start_timer(ctx, service, seconds, &id, message, ops) {
-                commit(ctx, service, ops);
-            }
+            start_timer(ctx, service, seconds, &id, message, ops)
         }
         "stop-all" => {
-            if stop_all(service) {
-                commit(ctx, service, ops);
+            let changed = stop_all(service);
+            if changed {
                 ops.push(Op::log("timed: stopped all"));
             }
+            changed
         }
         "stop" => {
-            if stop_by_id(service, &payload) {
-                commit(ctx, service, ops);
+            let changed = stop_by_id(service, &payload);
+            if changed {
                 ops.push(Op::log(format!("timed: stopped {payload}")));
             }
+            changed
         }
         "pause" => {
-            if pause_by_id(ctx, service, &payload) {
-                commit(ctx, service, ops);
+            let changed = pause_by_id(ctx, service, &payload);
+            if changed {
                 ops.push(Op::log(format!("timed: paused {payload}")));
             }
+            changed
         }
         "resume" => {
-            if resume_by_id(ctx, service, &payload) {
-                commit(ctx, service, ops);
+            let changed = resume_by_id(ctx, service, &payload);
+            if changed {
                 ops.push(Op::log(format!("timed: resumed {payload}")));
             }
+            changed
         }
         "list" => {
             ops.push(Op::log(format!(
@@ -491,8 +496,9 @@ fn ipc(ctx: &Context, service: &mut Service, ops: &mut Vec<Op>) {
                     duration::clock(remaining)
                 )));
             }
+            false
         }
-        _ => {}
+        _ => false,
     }
 }
 

@@ -47,42 +47,84 @@ const USED_COLORS: &str = "local COLOR_ROLES = {
   \"outline_variant\",
 }";
 
-const UNUSED_HOST_FIELDS: [&str; 11] = [
-    "dark = invoke(noctalia, \"isDarkMode\"),",
-    "outputs = invoke(noctalia, \"outputs\"),",
-    "focused_output_name = invoke(noctalia, \"focusedOutputName\"),",
-    "pluginDir = invoke(noctalia, \"pluginDir\"),",
-    "pluginDataDir = invoke(noctalia, \"pluginDataDir\"),",
-    "clipboard = invoke(noctalia, \"clipboardText\"),",
-    "calendar = invoke(noctalia, \"calendarEvents\"),",
-    "media = invoke(noctalia, \"mediaPlayer\"),",
-    "stats = invoke(noctalia, \"systemStats\"),",
-    "nightlight = invoke(noctalia, \"nightlight.state\"),",
-    "compositor = { name = invoke(noctalia, \"compositor.name\") },",
-];
-
-const REQUEST_ENCODING: &str = r#"  local field_count = 0
-  for _ in pairs(request) do field_count += 1 end
+const ENCODE_REQUEST: &str = r#"local function encodeRequest(request)
   local head = noctalia.json.encode({
     boot = request.boot,
     entry = request.entry,
     event = request.event,
     payload = request.payload or {},
-  }) or "{}"
-  local host = noctalia.json.encode(M.host) or "{}"
-  local text
-  if field_count == 7
-    and head:sub(1, 1) == "{" and head:sub(-1) == "}"
-    and host:sub(1, 1) == "{" and host:sub(-1) == "}" then
-    text = string.sub(head, 1, -2)
+  })
+  local host = noctalia.json.encode(M.host)
+  if type(head) == "string" and type(host) == "string"
+    and head:sub(1, 1) == "{" and head:sub(-1, -1) == "}"
+    and host:sub(1, 1) == "{" and host:sub(-1, -1) == "}" then
+    return string.sub(head, 1, -2)
       .. ',"config":' .. CONFIG_JSON
       .. ',"state":' .. STATE_JSON
       .. ',"host":' .. host .. "}"
-  else
-    text = noctalia.json.encode(encodeBytes(request))
   end
-  local ok, err = noctalia.writeFile(temporary, text)"#;
+  return noctalia.json.encode(encodeBytes(request))
+end"#;
 
+const SNAPSHOT: &str = r#"local function snapshot(event)
+  local fixed = {
+    setting = {},
+    colors = {},
+  }
+  if M.entry == "timed_indicator" then
+    fixed.bar = {
+      vertical = invoke(barWidget, "isVertical"),
+      output_name = invoke(barWidget, "outputName"),
+    }
+  end
+  for _, path in ipairs(SETTING_PATHS) do
+    fixed.setting[path] = invoke(noctalia, "getSetting", path)
+  end
+  for _, role in ipairs(COLOR_ROLES) do
+    fixed.colors[role] = invoke(noctalia, "getColor", role)
+  end
+  local live = {
+    now_ms = invoke(noctalia, "nowMs") or 0,
+    timed_state_version = STATE_VERSION,
+  }
+  if event == "load" or event == "activate" or event == "action"
+    or event == "right_click" then
+    live.timed_last_command = noctalia.state.get("timed.lastCommand")
+  end
+  if M.entry == "service" and event == "load" then
+    live.timed_command = noctalia.state.get("timed.command")
+  end
+  if M.entry == "panel" and event == "open" then
+    live.timed_colors = noctalia.state.get("timed.colors")
+  end
+  return live, fixed
+end"#;
+
+const WRITE_REQUEST: &str = r#"local function writeRequest(request)
+  sequence += 1
+  local target = REQUEST_DIR .. "/" .. string.format("%012d", sequence) .. ".json"
+  local live, fixed = snapshot(request.event)
+  for key, value in pairs(live) do
+    fixed[key] = value
+  end
+  M.host = fixed
+  request.host = M.host
+  local ok, err = noctalia.writeFile(target, encodeRequest(request))
+  if not ok then
+    noctalia.removeFile(target)
+    noctalia.log("noctalia bridge: spool write failed: " .. tostring(err))
+  end
+end"#;
+
+const ENTRY_SNAPSHOT: &str = r#"  if entry == "timed_indicator" then
+    SETTING_PATHS = { "shell.font_family" }
+  elseif entry == "panel" or entry == "launcher" then
+    SETTING_PATHS = { "shell.time_format", "shell.date_format" }
+    COLOR_ROLES = {}
+  else
+    SETTING_PATHS = {}
+    COLOR_ROLES = {}
+  end"#;
 pub fn run() -> Option<ExitCode> {
     let mut args = env::args().skip(1);
     if args.next().as_deref() != Some("emit") {
@@ -125,6 +167,10 @@ fn emit(dir: &Path, helper: &str) -> io::Result<()> {
     Ok(())
 }
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "one structural pass prunes the generated bridge"
+)]
 fn prune_bridge(source: &str) -> io::Result<String> {
     let mut fixed = source.to_owned();
     for role in RETIRED {
@@ -159,19 +205,40 @@ fn prune_bridge(source: &str) -> io::Result<String> {
         let end = start.saturating_add(offset).saturating_add(3);
         fixed.replace_range(start..end, &format!("{USED_COLORS}\n"));
     }
-    for field in UNUSED_HOST_FIELDS {
-        fixed = fixed.replace(&format!("    {field}\n"), "");
-    }
     fixed = fixed
-        .replace(
-            "  local ok, err = noctalia.writeFile(temporary, noctalia.json.encode(encodeBytes(request)))",
-            REQUEST_ENCODING,
-        )
         .replace(
             "noctalia.json.encode(encodeBytes(response))",
             "noctalia.json.encode(response)",
         )
-        .replace("  M.host = snapshot()\n  startStream()", "  startStream()");
+        .replace("local fixed_host = nil\nlocal fixed_sent = false\n", "")
+        .replace("    -- A fresh helper has no cached fixed snapshot.\n", "")
+        .replace(
+            "    -- The helper may have rejected the request that carried the fixed part,\n    -- so it has to travel again with the next one.\n",
+            "",
+        )
+        .replace("    fixed_sent = false\n", "");
+    replace_function(&mut fixed, "local function sameValue", "\nend\n", "")?;
+    replace_function(&mut fixed, "local function mergeHost", "\nend\n", "")?;
+    replace_function(
+        &mut fixed,
+        "local function snapshot()",
+        "\nend\n",
+        SNAPSHOT,
+    )?;
+    replace_function(
+        &mut fixed,
+        "local function writeRequest(request)",
+        "\nend\n",
+        &format!("{ENCODE_REQUEST}\n\n{WRITE_REQUEST}"),
+    )?;
+    fixed = fixed.replace(
+        "  M.entry = entry\n",
+        &format!("  M.entry = entry\n{ENTRY_SNAPSHOT}\n"),
+    );
+    fixed = fixed.replace(
+        "  local host, fixed = snapshot()\n  M.host = mergeHost(fixed, host)\n  startStream()",
+        "  startStream()",
+    );
     fixed = fixed.replacen(
         "M.state = {}\n",
         "M.state = {}\nlocal CONFIG_JSON = \"{}\"\nlocal STATE_JSON = \"{}\"\nlocal STATE_VERSION = 0\n",
@@ -185,11 +252,30 @@ fn prune_bridge(source: &str) -> io::Result<String> {
         "    M.state = value or {}\n",
         "    M.state = value or {}\n    STATE_VERSION += 1\n    STATE_JSON = noctalia.json.encode(M.state) or \"{}\"\n",
     );
-    fixed = fixed.replace(
-        "    now_ms = invoke(noctalia, \"nowMs\") or 0,\n",
-        "    now_ms = invoke(noctalia, \"nowMs\") or 0,\n    timed_state_version = STATE_VERSION,\n",
-    );
     Ok(fixed)
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the source, function markers, and replacement text"
+)]
+fn replace_function(
+    source: &mut String,
+    start_marker: &str,
+    end_marker: &str,
+    replacement: &str,
+) -> io::Result<()> {
+    let Some(start) = source.find(start_marker) else {
+        return Err(io::Error::other(format!("cannot find {start_marker}")));
+    };
+    let Some(offset) = source[start..].find(end_marker) else {
+        return Err(io::Error::other(format!(
+            "cannot find the end of {start_marker}"
+        )));
+    };
+    let end = start.saturating_add(offset).saturating_add(4);
+    source.replace_range(start..end, replacement);
+    Ok(())
 }
 
 fn prune_panel(source: &str) -> io::Result<String> {
@@ -219,40 +305,101 @@ fn prune_panel(source: &str) -> io::Result<String> {
 mod tests {
     use super::*;
 
+    fn bridge_source() -> String {
+        r#"local COLOR_ROLES = {
+  "surface_variant",
+  "outline",
+  "primary",
+  "shadow",
+}
+local SETTING_PATHS = {
+  "shell.time_format",
+  "shell.date_format",
+  "shell.lang",
+  "bar",
+}
+M.state = {}
+local fixed_host = nil
+local fixed_sent = false
+local function sameValue(left, right)
+  return left == right
+end
+local function mergeHost(fixed, live)
+  return fixed
+end
+local function snapshot()
+  local host = {
+    now_ms = invoke(noctalia, "nowMs") or 0,
+    dark = invoke(noctalia, "isDarkMode"),
+    pluginDir = invoke(noctalia, "pluginDir"),
+    setting = {},
+    bar = {},
+    colors = {},
+  }
+  return host, host
+end
+local function writeRequest(request)
+  local host, fixed = snapshot()
+  M.host = mergeHost(fixed, host)
+  request.host = host
+  request.host_fixed = fixed
+  local ok, err = noctalia.writeFile(target, noctalia.json.encode(encodeBytes(request)))
+  if not ok then
+    noctalia.log(err)
+  end
+end
+function M.setup(entry, configKeys)
+  M.state = noctalia.state.get(STATE_KEY) or {}
+  M.entry = entry
+  local host, fixed = snapshot()
+  M.host = mergeHost(fixed, host)
+  startStream()
+end
+function M.watch_state(rerender)
+  noctalia.state.watch(STATE_KEY, function(value)
+    M.state = value or {}
+    rerender()
+  end)
+end
+noctalia.json.encode(encodeBytes(response))
+"#
+        .to_owned()
+    }
+
     #[test]
     fn prune_bridge_keeps_the_settings_the_plugin_reads() {
-        let source = "local SETTING_PATHS = {\n  \"shell.time_format\",\n  \"shell.lang\",\n  \"bar\",\n}\n";
-        assert_eq!(
-            prune_bridge(source).expect("pruned"),
-            "local SETTING_PATHS = {\n  \"shell.time_format\",\n  \"shell.font_family\",\n}\n"
-        );
+        let pruned = prune_bridge(&bridge_source()).expect("pruned");
+        assert!(pruned.contains(
+            "local SETTING_PATHS = {\n  \"shell.time_format\",\n  \"shell.font_family\",\n  \"shell.date_format\",\n}"
+        ));
+        assert!(!pruned.contains("shell.lang"));
+        assert!(pruned.contains(ENTRY_SNAPSHOT));
     }
+
     #[test]
-    fn prune_bridge_keeps_only_the_host_fields_timed_reads() {
-        let source = "local COLOR_ROLES = {\n  \"surface_variant\",\n  \"outline\",\n  \"primary\",\n  \"shadow\",\n}\nlocal SETTING_PATHS = {\n  \"shell.time_format\",\n}\nlocal function snapshot()\n  local host = {\n    now_ms = invoke(noctalia, \"nowMs\") or 0,\n    dark = invoke(noctalia, \"isDarkMode\"),\n    outputs = invoke(noctalia, \"outputs\"),\n    pluginDir = invoke(noctalia, \"pluginDir\"),\n    setting = {},\n    bar = {},\n    colors = {},\n  }\nend\nlocal function writeRequest(request)\n  M.host = snapshot()\nend\nfunction M.setup(entry, configKeys)\n  M.host = snapshot()\n  startStream()\nend\n";
-        let pruned = prune_bridge(source).expect("pruned");
+    fn prune_bridge_snapshots_only_what_each_entry_reads() {
+        let pruned = prune_bridge(&bridge_source()).expect("pruned");
         assert!(pruned.contains(USED_COLORS));
         assert!(!pruned.contains("shadow"));
         assert!(!pruned.contains("isDarkMode"));
         assert!(!pruned.contains("pluginDir = invoke"));
-        assert!(pruned.contains("\"shell.font_family\""));
-        assert!(pruned.contains("timed_state_version = STATE_VERSION"));
-        assert!(pruned.contains(
-            "local function writeRequest(request)\n  M.host = snapshot()"
-        ));
-        assert!(
-            pruned.contains(
-                "function M.setup(entry, configKeys)\n  startStream()"
-            )
-        );
+        assert!(pruned.contains(SNAPSHOT));
+        assert_eq!(pruned.matches("snapshot(request.event)").count(), 1);
+        assert!(!pruned.contains("local host, fixed = snapshot()"));
+        assert!(pruned.contains("M.entry = entry\n"));
+        assert!(pruned.contains("  startStream()"));
     }
 
     #[test]
     fn prune_bridge_encodes_json_values_without_copying_them() {
-        let source = "  local ok, err = noctalia.writeFile(temporary, noctalia.json.encode(encodeBytes(request)))\nnoctalia.json.encode(encodeBytes(response))\nM.state = {}\n  M.state = noctalia.state.get(STATE_KEY) or {}\n    M.state = value or {}\n";
-        let pruned = prune_bridge(source).expect("pruned");
-        assert!(pruned.contains(REQUEST_ENCODING));
+        let pruned = prune_bridge(&bridge_source()).expect("pruned");
+        assert!(pruned.contains(ENCODE_REQUEST));
+        assert!(pruned.contains(WRITE_REQUEST));
+        assert_eq!(pruned.matches("encodeBytes(request)").count(), 1);
         assert!(pruned.contains("noctalia.json.encode(response)"));
+        assert!(!pruned.contains("host_fixed"));
+        assert!(!pruned.contains("sameValue"));
+        assert!(!pruned.contains("mergeHost"));
         assert!(pruned.contains("local STATE_VERSION = 0"));
         assert!(pruned.contains("local CONFIG_JSON = \"{}\""));
         assert!(
@@ -265,6 +412,9 @@ mod tests {
             2
         );
         assert_eq!(pruned.matches("STATE_VERSION += 1").count(), 2);
+        assert!(pruned.contains("live.timed_last_command"));
+        assert!(pruned.contains("live.timed_command"));
+        assert!(pruned.contains("live.timed_colors"));
     }
 
     #[test]

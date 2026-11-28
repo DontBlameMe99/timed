@@ -16,12 +16,13 @@ use serde_json::{Value, json};
 use crate::duration;
 use crate::file;
 use crate::i18n::tr;
+use crate::math::quotient;
 use crate::sync::lock;
 use crate::timer::{self, Timer};
 use crate::urgency::{self, Colors, State};
 
 const PANEL_ID: &str = "dontblameme/timed:panel";
-const RUNNING_INTERVAL_MS: i64 = 1_000;
+const MIN_INTERVAL_MS: i64 = 1_000;
 const IDLE_INTERVAL_MS: i64 = 60_000;
 const HIDDEN_INTERVAL_MS: i64 = 86_400_000;
 
@@ -187,8 +188,17 @@ pub fn update(ctx: &Context) -> Result<Vec<Op>> {
 }
 
 fn render(ctx: &Context, widget: &mut Widget) -> Vec<Op> {
+    let config = Config::read(ctx);
     if memo_hit(ctx, widget) {
-        return Vec::new();
+        let interval = next_interval(
+            &widget.memo.timers,
+            &config,
+            ctx.now_ms,
+            widget.fallback,
+        );
+        let mut ops = Vec::new();
+        set_interval(widget, interval, &mut ops);
+        return ops;
     }
     let timers = mem::take(&mut widget.memo.timers);
     let ops = render_timers(ctx, widget, &timers);
@@ -258,14 +268,9 @@ fn render_timers(
     if let Some(value) = tooltip(ctx, widget, &Tooltip { timers, now }) {
         ops.push(Op::BarTooltip { value });
     }
-    let running = timers.iter().any(|timer| !timer.paused);
     set_interval(
         widget,
-        if running {
-            RUNNING_INTERVAL_MS
-        } else {
-            IDLE_INTERVAL_MS
-        },
+        next_interval(timers, &config, now, widget.fallback),
         &mut ops,
     );
     ops
@@ -366,6 +371,86 @@ fn set_interval(widget: &mut Widget, ms: i64, ops: &mut Vec<Op>) {
     }
     widget.interval = Some(ms);
     ops.push(Op::set_interval(ms.unsigned_abs()));
+}
+
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the timer list, display settings, clock, and render mode"
+)]
+fn next_interval(
+    timers: &[Timer],
+    config: &Config,
+    now: i64,
+    fallback: bool,
+) -> i64 {
+    if timers.is_empty() && config.hide_when_idle {
+        return HIDDEN_INTERVAL_MS;
+    }
+    if !timers.iter().any(|timer| !timer.paused) {
+        return IDLE_INTERVAL_MS;
+    }
+    let mut delay = HIDDEN_INTERVAL_MS;
+    for timer in timers.iter().filter(|timer| !timer.paused) {
+        let remaining = timer.remaining_ms(now);
+        delay = delay.min(remaining);
+        if let Some(next) = duration::next_detailed_change_ms(remaining) {
+            delay = delay.min(next);
+        }
+    }
+    if let Some(nearest) = timers.first() {
+        if let Some(next) =
+            next_urgency_change_ms(nearest, now, config.colors.use_urgency)
+        {
+            delay = delay.min(next);
+        }
+        if config.show_progress
+            && !fallback
+            && let Some(next) = next_ring_change_ms(nearest, now)
+        {
+            delay = delay.min(next);
+        }
+    }
+    delay.clamp(MIN_INTERVAL_MS, HIDDEN_INTERVAL_MS)
+}
+
+fn next_urgency_change_ms(
+    timer: &Timer,
+    now: i64,
+    enabled: bool,
+) -> Option<i64> {
+    if !enabled {
+        return None;
+    }
+    let total = timer.seconds.saturating_mul(1_000);
+    let remaining = timer.remaining_ms(now);
+    let mut next = None;
+    for share in [50, 20] {
+        let threshold =
+            quotient(total.saturating_mul(share).saturating_add(99), 100);
+        if remaining > threshold {
+            let delay = remaining.saturating_sub(threshold);
+            next = Some(next.map_or(delay, |value: i64| value.min(delay)));
+        }
+    }
+    next
+}
+
+fn next_ring_change_ms(timer: &Timer, now: i64) -> Option<i64> {
+    let remaining = timer.remaining_ms(now);
+    let step = i64::from(timer.fraction_step_ms(remaining, RING_STEPS));
+    if step == 0 {
+        return None;
+    }
+    let total = timer.seconds.saturating_mul(1_000);
+    let steps = i64::from(RING_STEPS);
+    // The rounded step drops when remaining crosses (step - 1/2) / steps.
+    let boundary = quotient(
+        total
+            .saturating_mul(step.saturating_mul(2).saturating_sub(1))
+            .saturating_sub(1),
+        steps.saturating_mul(2),
+    );
+    (boundary < remaining).then_some(remaining.saturating_sub(boundary))
 }
 
 struct Fallback<'a> {
@@ -594,6 +679,7 @@ fn tooltip(
     }
 
     let mut keys = String::new();
+    let mut values = Vec::with_capacity(timers.len());
     for timer in timers {
         if !keys.is_empty() {
             keys.push('|');
@@ -605,6 +691,7 @@ fn tooltip(
             duration::approx_detailed(timer.remaining_seconds(now))
         };
         let _ = write!(keys, "{}={value}", timer.id);
+        values.push(value);
     }
     if widget.tooltip.as_deref() == Some(keys.as_str()) {
         return None;
@@ -613,16 +700,11 @@ fn tooltip(
 
     let rows = timers
         .iter()
-        .map(|timer| {
-            let left = duration::approx_detailed(timer.remaining_seconds(now));
+        .zip(values)
+        .map(|(timer, value)| {
             let title = timer.message.clone().unwrap_or_else(|| {
                 tr(ctx, "bar.timer", &[("duration", timer.label.clone())])
             });
-            let value = if timer.paused {
-                tr(ctx, "bar.paused", &[("time", left)])
-            } else {
-                left
-            };
             json!({ "key": title, "value": value })
         })
         .collect();
@@ -667,6 +749,7 @@ mod tests {
     use super::*;
     use crate::test_context;
     use crate::timer::COLORS_KEY;
+    use std::slice;
 
     fn running() -> Timer {
         Timer {
@@ -810,6 +893,195 @@ mod tests {
                         "useUrgency": true,
                     },
                 })
+        }));
+    }
+    #[expect(
+        clippy::fn_params_excessive_bools,
+        reason = "the fixture mirrors two independent widget settings"
+    )]
+    fn config(show_progress: bool, use_urgency: bool) -> Config {
+        Config {
+            show_text: true,
+            show_count: true,
+            show_progress,
+            hide_when_idle: false,
+            colors: Colors {
+                use_urgency,
+                ..Colors::defaults()
+            },
+        }
+    }
+
+    #[test]
+    fn interval_waits_for_the_next_visible_change() {
+        let now: i64 = 1_800_000_000_000;
+        let long = Timer {
+            seconds: 86_400,
+            ends_at: Some(now.saturating_add(86_400_000)),
+            ..running()
+        };
+        assert_eq!(
+            next_interval(
+                slice::from_ref(&long),
+                &config(true, true),
+                now,
+                false
+            ),
+            216_001
+        );
+
+        let short = Timer {
+            seconds: 120,
+            ends_at: Some(now.saturating_add(120_000)),
+            ..running()
+        };
+        let timers = [long, short];
+        assert_eq!(
+            next_interval(&timers, &config(false, true), now, false),
+            31_000
+        );
+
+        let mut paused = running();
+        paused.paused = true;
+        paused.ends_at = None;
+        paused.remaining_ms = Some(60_000);
+        assert_eq!(
+            next_interval(
+                slice::from_ref(&paused),
+                &config(true, true),
+                now,
+                false
+            ),
+            IDLE_INTERVAL_MS
+        );
+
+        let mut hidden = config(true, true);
+        hidden.hide_when_idle = true;
+        assert_eq!(next_interval(&[], &hidden, now, false), HIDDEN_INTERVAL_MS);
+    }
+
+    #[test]
+    fn interval_tracks_urgency_only_when_it_changes_color() {
+        let now = 1_000;
+        let mut timer = running();
+        timer.seconds = 300;
+        timer.ends_at = Some(152_000);
+        assert_eq!(
+            next_interval(
+                slice::from_ref(&timer),
+                &config(false, true),
+                now,
+                false
+            ),
+            1_000
+        );
+        assert_eq!(
+            next_interval(
+                slice::from_ref(&timer),
+                &config(false, false),
+                now,
+                false
+            ),
+            2_000
+        );
+    }
+
+    #[test]
+    fn ring_change_lands_on_the_quantization_boundary() {
+        let timer = Timer {
+            seconds: 601,
+            ends_at: Some(602_000),
+            ..running()
+        };
+        let delay = next_ring_change_ms(&timer, 1_000).expect("ring change");
+        assert_eq!(delay, 1_503);
+        assert_eq!(timer.fraction_step_ms(601_000_i64, RING_STEPS), 200);
+        assert_eq!(
+            timer.fraction_step_ms(
+                601_000_i64.saturating_sub(delay),
+                RING_STEPS
+            ),
+            199
+        );
+        assert_eq!(
+            timer.fraction_step_ms(
+                601_000_i64.saturating_sub(delay).saturating_add(1),
+                RING_STEPS
+            ),
+            200
+        );
+    }
+
+    #[test]
+    #[expect(
+        clippy::excessive_nesting,
+        reason = "the test replays the ring through every quantized step"
+    )]
+    fn ring_scheduling_visits_every_quantization_step() {
+        for seconds in [1_i64, 10, 59, 60, 61, 599, 600, 601, 3_600, 86_400] {
+            let mut remaining = seconds.saturating_mul(1_000);
+            let mut timer = Timer {
+                seconds,
+                ends_at: Some(remaining.saturating_add(1)),
+                ..running()
+            };
+            while remaining > 0 {
+                let step = timer.fraction_step_ms(remaining, RING_STEPS);
+                let Some(delay) = next_ring_change_ms(&timer, 1) else {
+                    break;
+                };
+                assert!(delay > 0 && delay <= remaining, "seconds {seconds}");
+                let boundary = remaining.saturating_sub(delay);
+                assert!(
+                    timer.fraction_step_ms(boundary, RING_STEPS) < step,
+                    "seconds {seconds}"
+                );
+                assert_eq!(
+                    timer.fraction_step_ms(
+                        boundary.saturating_add(1),
+                        RING_STEPS
+                    ),
+                    step,
+                    "seconds {seconds}"
+                );
+                remaining = boundary;
+                timer.ends_at = Some(remaining.saturating_add(1));
+            }
+        }
+    }
+
+    #[test]
+    fn memo_hit_recomputes_a_shortened_interval() {
+        let now: i64 = 1_800_000_000_000;
+        let state = json!({ "timers": [{
+            "id": "one",
+            "seconds": 600,
+            "label": "10m",
+            "paused": false,
+            "endsAt": now + 600_000
+        }] });
+        let host = json!({
+            "now_ms": now,
+            "bar": { "vertical": false, "output_name": "DP-1" },
+            "colors": {},
+            "setting": { "shell.font_family": "sans-serif" },
+            "timed_state_version": 0,
+        });
+        let mut ctx = test_context::context(
+            "render",
+            json!({ "show_progress": true, "use_urgency_colors": true }),
+            state,
+            host,
+        );
+        let mut widget = Widget::new();
+        let first = render(&ctx, &mut widget);
+        assert!(first.iter().any(|op| {
+            serde_json::to_value(op).expect("op")["ms"] == json!(1_501)
+        }));
+        ctx.now_ms = now.saturating_add(10);
+        let earlier = render(&ctx, &mut widget);
+        assert!(earlier.iter().any(|op| {
+            serde_json::to_value(op).expect("op")["ms"] == json!(1_491)
         }));
     }
 }

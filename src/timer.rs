@@ -216,8 +216,9 @@ pub(crate) fn seed_sequence(value: i64) {
 fn next_sequence(ctx: &Context) -> i64 {
     let mut sequence = lock(&SEQUENCE);
     let current = sequence.unwrap_or_else(|| {
-        ctx.global_state(LAST_COMMAND_KEY)
-            .and_then(|value| value.as_i64())
+        ctx.host
+            .get("timed_last_command")
+            .and_then(Value::as_i64)
             .unwrap_or(0)
     });
     let next = ctx.now_ms.max(current.saturating_add(1));

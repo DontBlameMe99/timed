@@ -416,6 +416,38 @@ fn detailed_text(time: Detailed) -> String {
     }
 }
 
+/// Milliseconds until the detailed countdown text changes, if it changes before
+/// the timer expires.
+#[must_use]
+pub(crate) fn next_detailed_change_ms(remaining_ms: i64) -> Option<i64> {
+    let remaining = remaining_ms.max(0);
+    let current = detailed_token(Detailed::of_ms(remaining));
+    if remaining == 0 || detailed_token(Detailed::of_ms(0)) == current {
+        return None;
+    }
+
+    let mut step = 1;
+    while step < remaining
+        && detailed_token(Detailed::of_ms(remaining.saturating_sub(step)))
+            == current
+    {
+        step = step.saturating_mul(2);
+    }
+    let mut high = step.min(remaining);
+    let mut low = quotient(step, 2);
+    while low.saturating_add(1) < high {
+        let middle = low.saturating_add(quotient(high.saturating_sub(low), 2));
+        if detailed_token(Detailed::of_ms(remaining.saturating_sub(middle)))
+            == current
+        {
+            low = middle;
+        } else {
+            high = middle;
+        }
+    }
+    Some(high)
+}
+
 /// Allocation-free identity of `approx_detailed` for milliseconds.
 #[must_use]
 pub fn approx_detailed_token_ms(milliseconds: i64) -> u64 {
@@ -653,6 +685,114 @@ mod tests {
             let seconds = quotient(milliseconds, 1_000)
                 .saturating_add(i64::from(remainder(milliseconds, 1_000) != 0));
             assert_eq!(approx_token_ms(milliseconds), approx_token(seconds));
+        }
+    }
+    #[test]
+    #[expect(
+        clippy::excessive_nesting,
+        reason = "the test checks every candidate boundary"
+    )]
+    fn next_detailed_change_lands_on_the_visible_boundary() {
+        for remaining in [
+            0,
+            1,
+            29_999,
+            30_000,
+            30_001,
+            89_999,
+            90_000,
+            90_001,
+            1_799_001,
+            3_599_999,
+            3_600_000,
+            86_399_000,
+            86_399_001,
+            DAY.saturating_mul(1_000),
+            42 * DAY * 1_000,
+            43 * DAY * 1_000,
+            44 * DAY * 1_000,
+            45 * DAY * 1_000,
+            MAX_SECONDS.saturating_mul(1_000),
+        ] {
+            if let Some(delay) = next_detailed_change_ms(remaining) {
+                assert!(delay > 0, "remaining {remaining}");
+                let boundary = remaining.saturating_sub(delay);
+                assert_ne!(
+                    approx_detailed_token_ms(boundary),
+                    approx_detailed_token_ms(remaining),
+                    "remaining {remaining}"
+                );
+                assert_eq!(
+                    approx_detailed_token_ms(boundary.saturating_add(1)),
+                    approx_detailed_token_ms(remaining),
+                    "remaining {remaining}"
+                );
+            }
+        }
+        for remaining in (0..=600_000).step_by(1_000) {
+            if let Some(delay) = next_detailed_change_ms(remaining) {
+                let boundary = remaining.saturating_sub(delay);
+                assert_ne!(
+                    approx_detailed_token_ms(boundary),
+                    approx_detailed_token_ms(remaining),
+                    "remaining {remaining}"
+                );
+            }
+        }
+    }
+    #[test]
+    #[expect(
+        clippy::excessive_nesting,
+        reason = "the test replays the countdown through every boundary"
+    )]
+    fn detailed_scheduling_visits_every_visible_change() {
+        for seconds in [
+            1,
+            10,
+            59,
+            60,
+            61,
+            599,
+            600,
+            601,
+            3_599,
+            3_600,
+            3_601,
+            86_399,
+            86_400,
+            86_401,
+            WEEK,
+            42 * DAY,
+            43 * DAY,
+            44 * DAY,
+            45 * DAY,
+            MONTH,
+            YEAR,
+            MAX_SECONDS,
+        ] {
+            let mut remaining = seconds.saturating_mul(1_000);
+            while let Some(delay) = next_detailed_change_ms(remaining) {
+                assert!(delay > 0 && delay <= remaining, "seconds {seconds}");
+                let boundary = remaining.saturating_sub(delay);
+                assert_ne!(
+                    approx_detailed_token_ms(boundary),
+                    approx_detailed_token_ms(remaining),
+                    "seconds {seconds}"
+                );
+                assert_eq!(
+                    approx_detailed_token_ms(boundary.saturating_add(1)),
+                    approx_detailed_token_ms(remaining),
+                    "seconds {seconds}"
+                );
+                remaining = boundary;
+            }
+            if remaining > 0 {
+                assert_eq!(
+                    approx_detailed_token_ms(0),
+                    approx_detailed_token_ms(remaining),
+                    "missed a visible change for {seconds}s"
+                );
+            }
         }
     }
 }

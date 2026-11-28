@@ -193,8 +193,8 @@ pub fn panel_colors(ctx: &Context) -> (Arc<Colors>, Vec<Op>) {
     let mut mirror = lock(&MIRROR);
     let mut ops = Vec::new();
     if mirror.is_none() {
-        let value = ctx.global_state(COLORS_KEY);
-        *mirror = Some(Arc::new(Colors::from_value(value.as_ref())));
+        let value = ctx.host.get("timed_colors");
+        *mirror = Some(Arc::new(Colors::from_value(value)));
         ops.push(Op::state_watch(COLORS_KEY, "colors"));
     }
     let colors = mirror

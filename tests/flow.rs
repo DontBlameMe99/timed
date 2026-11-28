@@ -20,6 +20,7 @@ struct Helper {
     sequence: usize,
     response: Value,
     host: Value,
+    queries: usize,
 }
 
 #[expect(
@@ -68,6 +69,7 @@ impl Helper {
             sequence: 0,
             response: json!({}),
             host: host(),
+            queries: 0,
         }
     }
 
@@ -84,7 +86,9 @@ impl Helper {
     }
 
     fn call(&mut self, entry: &str, event: &str, payload: Value) -> Vec<Value> {
+        self.queries = 0;
         self.sequence = self.sequence.saturating_add(1);
+        let name = format!("{:012}", self.sequence);
         let request = json!({
             "boot": self.boot,
             "entry": entry,
@@ -94,7 +98,6 @@ impl Helper {
             "state": self.state,
             "host": self.host.clone(),
         });
-        let name = format!("{:012}", self.sequence);
         let target = self.run_dir.join(format!("{name}.json"));
         let temporary = self.run_dir.join(format!("{name}.pending"));
         fs::write(&temporary, request.to_string()).expect("request");
@@ -115,6 +118,7 @@ impl Helper {
                 }
             }
             if value["op"] == json!("query") {
+                self.queries = self.queries.saturating_add(1);
                 self.answer(&value);
                 continue;
             }
@@ -229,11 +233,11 @@ fn service_publishes_persists_and_notifies() {
 
     let ops = helper.call("service", "load", json!({ "source": "load" }));
     assert_eq!(timers(&ops), Some(json!([])));
+    assert_eq!(helper.queries, 0);
     assert!(
         ops.iter().any(|op| op["op"] == json!("set_interval")
             && op["ms"] == json!(86_400_000))
     );
-    assert!(ops.iter().any(|op| op["op"] == json!("host_call")));
 
     let command = json!({
         "action": "start",
@@ -271,12 +275,14 @@ fn service_publishes_persists_and_notifies() {
     // A shell restart reloads the saved timer and does not start it again.
     drop(helper);
     let mut helper = Helper::start(&root);
+    helper.host["timed_last_command"] = json!(NOW);
     let ops = helper
         .state(
             json!({ "timed.command": command, "timed.lastCommand": NOW }),
             json!(null),
         )
         .call("service", "load", json!({ "source": "load" }));
+    assert_eq!(helper.queries, 0);
     assert_eq!(timers(&ops).expect("reloaded")[0]["id"], published[0]["id"]);
     assert!(!ops.iter().any(|op| op["op"] == json!("log")));
 
@@ -310,7 +316,98 @@ fn service_publishes_persists_and_notifies() {
     drop(helper);
     let _ = fs::remove_dir_all(root);
 }
+#[test]
+fn service_load_applies_the_command_snapshot_without_queries() {
+    let root = scratch("service-command-snapshot");
+    let mut helper = Helper::start(&root);
+    let command = json!({
+        "action": "start",
+        "seconds": 300,
+        "message": "tea",
+        "n": NOW
+    });
+    helper.host["timed_command"] = command;
+    helper.host["timed_last_command"] = json!(0);
 
+    let ops = helper.state(json!({}), json!(null)).call(
+        "service",
+        "load",
+        json!({ "source": "load" }),
+    );
+
+    assert_eq!(helper.queries, 0);
+    let published = timers(&ops).expect("published");
+    assert_eq!(published[0]["label"], json!("5m"));
+    assert_eq!(published[0]["message"], json!("tea"));
+
+    drop(helper);
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn expiry_and_command_commit_once() {
+    let root = scratch("service-expire-command");
+    let mut helper = Helper::start(&root);
+    fs::write(
+        root.join("data/timers.json"),
+        json!({ "timers": [{
+            "id": "old",
+            "seconds": 5,
+            "label": "5s",
+            "paused": false,
+            "endsAt": NOW + 5_000
+        }] })
+        .to_string(),
+    )
+    .expect("seed");
+    helper.state(json!({}), json!(null)).call(
+        "service",
+        "load",
+        json!({ "source": "load" }),
+    );
+
+    let command = json!({
+        "action": "start",
+        "seconds": 300,
+        "n": NOW
+    });
+    let ops = helper.now(NOW + 10_000).call(
+        "service",
+        "host_callback",
+        json!({ "id": "command", "args": [command] }),
+    );
+
+    assert_eq!(
+        ops.iter()
+            .filter(|op| op["op"] == json!("state_set")
+                && op["key"] == json!("timed.state"))
+            .count(),
+        1
+    );
+    assert_eq!(
+        ops.iter()
+            .filter(|op| op["op"] == json!("set_interval"))
+            .count(),
+        1
+    );
+    let notify = ops
+        .iter()
+        .position(|op| op["op"] == json!("notify"))
+        .expect("expiry notification");
+    let started = ops
+        .iter()
+        .position(|op| {
+            op["message"] == json!("timed: started 1800000000000 for 5m")
+        })
+        .expect("new timer log");
+    assert!(notify < started, "{ops:?}");
+    let published = timers(&ops).expect("published");
+    assert_eq!(published.as_array().expect("timers").len(), 1);
+    assert_eq!(published[0]["id"], json!(NOW.to_string()));
+
+    drop(helper);
+    let _ = fs::remove_dir_all(root);
+}
 #[test]
 fn ipc_controls_the_timer_list() {
     let root = scratch("ipc");
@@ -429,11 +526,9 @@ fn widget_renders_the_published_list() {
     assert!(ops.iter().any(|op| op["op"] == json!("bar_image")));
     assert!(ops.iter().any(|op| op["op"] == json!("bar_tooltip")
         && op["value"][1]["value"] == json!("Paused - 15m")));
-    assert!(
-        ops.iter()
-            .any(|op| op["op"] == json!("set_interval")
-                && op["ms"] == json!(1000))
-    );
+    assert!(ops.iter().any(
+        |op| op["op"] == json!("set_interval") && op["ms"] == json!(1_501)
+    ));
     let image = ops
         .iter()
         .find(|op| op["op"] == json!("bar_image"))
@@ -527,11 +622,13 @@ fn widget_shows_minutes_in_bar_tooltip_and_panel() {
         "idle": "primary",
         "useUrgency": true
     });
+    helper.host["timed_colors"] = colors.clone();
     let ops = helper.state(state, colors).call(
         "panel",
         "open",
         json!({ "context": null }),
     );
+    assert_eq!(helper.queries, 0);
     let tree = ops
         .iter()
         .find(|op| op["op"] == json!("panel_render"))
@@ -547,6 +644,13 @@ fn panel_renders_the_published_list() {
     let root = scratch("ui-panel");
     let mut helper = Helper::start(&root);
 
+    helper.host["timed_colors"] = json!({
+        "safe": "tertiary",
+        "warning": "secondary",
+        "urgent": "error",
+        "idle": "primary",
+        "useUrgency": true
+    });
     let ops = helper
         .state(
             fixture(),
@@ -559,6 +663,7 @@ fn panel_renders_the_published_list() {
             }),
         )
         .call("panel", "open", json!({ "context": null }));
+    assert_eq!(helper.queries, 0);
     let tree = ops
         .iter()
         .find(|op| op["op"] == json!("panel_render"))
@@ -637,6 +742,7 @@ fn launcher_queries_and_starts_timers() {
     assert_eq!(command["value"]["action"], json!("start"));
     assert_eq!(command["value"]["seconds"], json!(3900));
     assert_eq!(command["value"]["message"], json!("wake up"));
+    assert_eq!(helper.queries, 0);
 
     drop(helper);
     let _ = fs::remove_dir_all(root);

@@ -50,8 +50,6 @@ end
 M.last_query = nil
 
 local boot = nil
-local fixed_host = nil
-local fixed_sent = false
 local sequence = 0
 local pending = {}
 local stream_started = false
@@ -154,45 +152,43 @@ local function invoke(root, path, ...)
   end
   return nil
 end
-local function snapshot()
+local function snapshot(event)
   local fixed = {
     setting = {},
-    bar = {
-      vertical = invoke(barWidget, "isVertical"),
-      output_name = invoke(barWidget, "outputName"),
-    },
     colors = {},
   }
+  if M.entry == "timed_indicator" then
+    fixed.bar = {
+      vertical = invoke(barWidget, "isVertical"),
+      output_name = invoke(barWidget, "outputName"),
+    }
+  end
   for _, path in ipairs(SETTING_PATHS) do
     fixed.setting[path] = invoke(noctalia, "getSetting", path)
   end
   for _, role in ipairs(COLOR_ROLES) do
     fixed.colors[role] = invoke(noctalia, "getColor", role)
   end
-  return {
+  local live = {
     now_ms = invoke(noctalia, "nowMs") or 0,
     timed_state_version = STATE_VERSION,
-  }, fixed
+  }
+  if event == "load" or event == "activate" or event == "action"
+    or event == "right_click" then
+    live.timed_last_command = noctalia.state.get("timed.lastCommand")
+  end
+  if M.entry == "service" and event == "load" then
+    live.timed_command = noctalia.state.get("timed.command")
+  end
+  if M.entry == "panel" and event == "open" then
+    live.timed_colors = noctalia.state.get("timed.colors")
+  end
+  return live, fixed
 end
 
-local function sameValue(left, right)
-  if left == right then return true end
-  if type(left) ~= "table" or type(right) ~= "table" then return false end
-  for key, value in pairs(left) do
-    if not sameValue(value, right[key]) then return false end
-  end
-  for key in pairs(right) do
-    if left[key] == nil then return false end
-  end
-  return true
-end
 
-local function mergeHost(fixed, live)
-  local host = {}
-  for key, value in pairs(fixed) do host[key] = value end
-  for key, value in pairs(live) do host[key] = value end
-  return host
-end
+
+
 
 local function resolve(root, path)
   local value = ROOTS[root]
@@ -291,28 +287,35 @@ local function shellQuote(value)
   return "'" .. tostring(value):gsub("'", "'\\''") .. "'"
 end
 
+local function encodeRequest(request)
+  local head = noctalia.json.encode({
+    boot = request.boot,
+    entry = request.entry,
+    event = request.event,
+    payload = request.payload or {},
+  })
+  local host = noctalia.json.encode(M.host)
+  if type(head) == "string" and type(host) == "string"
+    and head:sub(1, 1) == "{" and head:sub(-1, -1) == "}"
+    and host:sub(1, 1) == "{" and host:sub(-1, -1) == "}" then
+    return string.sub(head, 1, -2)
+      .. ',"config":' .. CONFIG_JSON
+      .. ',"state":' .. STATE_JSON
+      .. ',"host":' .. host .. "}"
+  end
+  return noctalia.json.encode(encodeBytes(request))
+end
+
 local function writeRequest(request)
   sequence += 1
   local target = REQUEST_DIR .. "/" .. string.format("%012d", sequence) .. ".json"
-  local host, fixed = snapshot()
-  M.host = mergeHost(fixed, host)
-  request.host = host
-  local sends_fixed = not fixed_sent or not sameValue(fixed, fixed_host)
-  if sends_fixed then
-    request.host_fixed = fixed
+  local live, fixed = snapshot(request.event)
+  for key, value in pairs(live) do
+    fixed[key] = value
   end
-  -- Written in place. The helper wakes on the create and retries a truncated
-  -- payload, so the round trip overlaps the write instead of waiting for a
-  -- rename to publish the file.
-  local ok, err = noctalia.writeFile(target, noctalia.json.encode(encodeBytes(request)))
-  if sends_fixed then
-    -- A write that failed never reached the helper, so the fixed part has to
-    -- travel again even though it was built once.
-    fixed_sent = ok == true
-    if fixed_sent then
-      fixed_host = fixed
-    end
-  end
+  M.host = fixed
+  request.host = M.host
+  local ok, err = noctalia.writeFile(target, encodeRequest(request))
   if not ok then
     noctalia.removeFile(target)
     noctalia.log("noctalia bridge: spool write failed: " .. tostring(err))
@@ -337,17 +340,12 @@ local function onLine(line)
     return
   end
   if message.control == "ready" then
-    -- A fresh helper has no cached fixed snapshot.
-    fixed_sent = false
     boot = message.boot
     REQUEST_DIR = message.spool or SPOOL_DIR
     flushPending()
     return
   end
   if message.control == "error" then
-    -- The helper may have rejected the request that carried the fixed part,
-    -- so it has to travel again with the next one.
-    fixed_sent = false
     noctalia.log("noctalia bridge: " .. tostring(message.message))
     return
   end
@@ -400,6 +398,15 @@ end
 
 function M.setup(entry, configKeys)
   M.entry = entry
+  if entry == "timed_indicator" then
+    SETTING_PATHS = { "shell.font_family" }
+  elseif entry == "panel" or entry == "launcher" then
+    SETTING_PATHS = { "shell.time_format", "shell.date_format" }
+    COLOR_ROLES = {}
+  else
+    SETTING_PATHS = {}
+    COLOR_ROLES = {}
+  end
   SPOOL_DIR = DATA_DIR .. "/.noctalia-rs/spool/" .. safeName(entry) .. "-" .. RUNTIME_ID
   M.config = {}
   for _, key in ipairs(configKeys) do
@@ -409,8 +416,6 @@ function M.setup(entry, configKeys)
   STATE_VERSION += 1
   CONFIG_JSON = noctalia.json.encode(M.config) or "{}"
   STATE_JSON = noctalia.json.encode(M.state) or "{}"
-  local host, fixed = snapshot()
-  M.host = mergeHost(fixed, host)
   startStream()
 end
 
